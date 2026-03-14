@@ -171,7 +171,12 @@ def _extract_and_copy(zip_path: str, project_root: str, temp_dir: str) -> int:
                 skipped += 1
                 continue
 
-            dst = os.path.join(project_root, rel)
+            dst = os.path.abspath(os.path.join(project_root, rel))
+            # Safety: never write outside the project root (zip path traversal)
+            if not dst.startswith(os.path.abspath(project_root)):
+                logger.warning(f"Safety skip (path traversal): {rel}")
+                skipped += 1
+                continue
             try:
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy2(src, dst)
