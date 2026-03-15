@@ -44,6 +44,7 @@ export interface PrivateJet extends FlightBase {
 export interface MilitaryFlight extends FlightBase {
   type: "military_flight";
   military_type?: "heli" | "fighter" | "tanker" | "cargo" | "recon" | "default";
+  force?: string;
 }
 
 export interface TrackedFlight extends FlightBase {
@@ -68,6 +69,7 @@ export interface UAV extends FlightBase {
   uav_type?: string;
   aircraft_model?: string;
   wiki?: string;
+  force?: string;
 }
 
 export type Flight = CommercialFlight | PrivateFlight | PrivateJet | MilitaryFlight | TrackedFlight | UAV;

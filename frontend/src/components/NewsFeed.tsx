@@ -427,7 +427,12 @@ function NewsFeedInner({ data, selectedEntity, regionDossier, regionDossierLoadi
             let airline = "UNKNOWN";
 
             if (selectedEntity.type === 'military_flight') {
-                airline = "MILITARY ASSET";
+                const mil = flight as import('@/types/dashboard').MilitaryFlight;
+                const milCountry = mil.country;
+                airline = mil.force
+                    ? `${milCountry} ${mil.force}`.trim()
+                    : (milCountry && milCountry !== 'Military Asset' && milCountry !== 'Unknown'
+                        ? milCountry : "MILITARY ASSET");
             } else if (selectedEntity.type === 'private_jet') {
                 airline = "PRIVATE JET";
             } else if (selectedEntity.type === 'private_flight') {

@@ -33,6 +33,56 @@ _UAV_WIKI = {
 }
 
 
+_ICAO_COUNTRY_RANGES = [
+    (0x780000, 0x7BFFFF, "China", "PLA"),
+    (0x840000, 0x87FFFF, "Japan", "JSDF"),
+    (0x700000, 0x71FFFF, "South Korea", "ROK"),
+    (0xE80000, 0xE80FFF, "Taiwan", "ROC"),
+]
+
+
+def _enrich_country(icao_hex: str, flag: str) -> tuple[str, str]:
+    """If flag is Unknown/empty, infer country and force from ICAO range."""
+    if flag and flag not in ("Unknown", "Military Asset", ""):
+        return flag, ""
+    try:
+        addr = int(icao_hex, 16)
+    except (ValueError, TypeError):
+        return flag or "Military Asset", ""
+    for start, end, country, force in _ICAO_COUNTRY_RANGES:
+        if start <= addr <= end:
+            return country, force
+    return flag or "Military Asset", ""
+
+
+def _classify_military_type(raw_model: str) -> str:
+    model = raw_model.upper().replace("-", "").replace(" ", "")
+    if "H" in model and any(c.isdigit() for c in model):
+        return "heli"
+    if any(k in model for k in [
+        "K35", "K46", "A33", "YY20",
+    ]):
+        return "tanker"
+    if any(k in model for k in [
+        "F16", "F35", "F22", "F15", "F18", "T38", "T6", "A10",
+        "J10", "J11", "J15", "J16", "J20", "JF17",
+        "SU27", "SU30", "SU35",
+        "F15J", "F2", "IDF", "FA50", "KF21",
+    ]):
+        return "fighter"
+    if any(k in model for k in [
+        "C17", "C5", "C130", "C30", "A400", "V22",
+        "Y20", "Y9", "Y8", "C2",
+    ]):
+        return "cargo"
+    if any(k in model for k in [
+        "P8", "E3", "E8", "U2",
+        "KJ500", "KJ200", "GX11", "P1", "E767", "E2K", "E2C",
+    ]):
+        return "recon"
+    return "default"
+
+
 def _classify_uav(model: str, callsign: str):
     """Check if an aircraft is a UAV based on type code, callsign prefix, or model keywords.
     Returns (is_uav, uav_type, wiki_url) or (False, None, None)."""
@@ -106,10 +156,13 @@ def fetch_military_flights():
                     gs_knots = f.get("gs")
                     speed_knots = round(gs_knots, 1) if isinstance(gs_knots, (int, float)) else None
 
+                    icao_hex = f.get("hex", "")
+
                     is_uav, uav_type, wiki_url = _classify_uav(model, callsign)
                     if is_uav:
+                        uav_country, uav_force = _enrich_country(icao_hex, f.get("flag", ""))
                         detected_uavs.append({
-                            "id": f"uav-{f.get('hex', '')}",
+                            "id": f"uav-{icao_hex}",
                             "callsign": callsign,
                             "aircraft_model": f.get("t", "Unknown"),
                             "lat": float(lat),
@@ -117,31 +170,24 @@ def fetch_military_flights():
                             "alt": alt_value,
                             "heading": heading,
                             "speed_knots": speed_knots,
-                            "country": f.get("flag", "Unknown"),
+                            "country": uav_country,
+                            "force": uav_force,
                             "uav_type": uav_type,
                             "wiki": wiki_url or "",
                             "type": "uav",
                             "registration": f.get("r", "N/A"),
-                            "icao24": f.get("hex", ""),
+                            "icao24": icao_hex,
                             "squawk": f.get("squawk", ""),
                         })
                         continue
 
-                    mil_cat = "default"
-                    if "H" in model and any(c.isdigit() for c in model):
-                        mil_cat = "heli"
-                    elif any(k in model for k in ["K35", "K46", "A33"]):
-                        mil_cat = "tanker"
-                    elif any(k in model for k in ["F16", "F35", "F22", "F15", "F18", "T38", "T6", "A10"]):
-                        mil_cat = "fighter"
-                    elif any(k in model for k in ["C17", "C5", "C130", "C30", "A400", "V22"]):
-                        mil_cat = "cargo"
-                    elif any(k in model for k in ["P8", "E3", "E8", "U2"]):
-                        mil_cat = "recon"
+                    mil_country, mil_force = _enrich_country(icao_hex, f.get("flag", ""))
+                    mil_cat = _classify_military_type(f.get("t", "UNKNOWN"))
 
                     military_flights.append({
                         "callsign": callsign,
-                        "country": f.get("flag", "Military Asset"),
+                        "country": mil_country,
+                        "force": mil_force,
                         "lng": float(lng),
                         "lat": float(lat),
                         "alt": alt_value,
@@ -154,7 +200,7 @@ def fetch_military_flights():
                         "dest_name": "UNKNOWN",
                         "registration": f.get("r", "N/A"),
                         "model": f.get("t", "Unknown"),
-                        "icao24": f.get("hex", ""),
+                        "icao24": icao_hex,
                         "speed_knots": speed_knots,
                         "squawk": f.get("squawk", "")
                     })
