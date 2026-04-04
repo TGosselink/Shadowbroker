@@ -12,11 +12,13 @@ const NO_STORE_HEADERS = {
   Pragma: 'no-cache',
 };
 
-function cookieOptions() {
+function cookieOptions(req: NextRequest) {
+  const host = req.headers.get('host') ?? '';
+  const isLoopback = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host);
   return {
     httpOnly: true,
     sameSite: 'strict' as const,
-    secure: process.env.NODE_ENV === 'production',
+    secure: process.env.NODE_ENV === 'production' && !isLoopback,
     path: '/',
     maxAge: COOKIE_MAX_AGE,
   };
@@ -80,7 +82,7 @@ export async function POST(req: NextRequest) {
   }
   const sessionToken = createAdminSessionToken(adminKey, COOKIE_MAX_AGE);
   const res = NextResponse.json({ ok: true }, { headers: NO_STORE_HEADERS });
-  res.cookies.set(COOKIE_NAME, sessionToken, cookieOptions());
+  res.cookies.set(COOKIE_NAME, sessionToken, cookieOptions(req));
   return res;
 }
 
@@ -91,7 +93,7 @@ export async function DELETE(req: NextRequest) {
   }
   const res = NextResponse.json({ ok: true }, { headers: NO_STORE_HEADERS });
   res.cookies.set(COOKIE_NAME, '', {
-    ...cookieOptions(),
+    ...cookieOptions(req),
     maxAge: 0,
   });
   return res;
