@@ -215,6 +215,10 @@ if [ ! -f "$PRIVACY_CORE_SO" ] && [ ! -f "$PRIVACY_CORE_DYLIB" ]; then
 fi
 if [ -f "$PRIVACY_CORE_SO" ] || [ -f "$PRIVACY_CORE_DYLIB" ]; then
     echo "[*] privacy-core shared library OK."
+    "$VENV_PY" "$SCRIPT_DIR/scripts/refresh_privacy_core_pin.py" || {
+        echo "[!] WARNING: privacy-core trust pin refresh failed. Startup may fail if backend/.env pins an old hash."
+        echo ""
+    }
 fi
 
 cd "$SCRIPT_DIR"

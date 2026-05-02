@@ -258,7 +258,14 @@ if not exist "%PRIVACY_CORE_DLL%" (
         cd /d "%ROOT%\backend"
     )
 )
-if exist "%PRIVACY_CORE_DLL%" echo [*] privacy-core DLL OK.
+if exist "%PRIVACY_CORE_DLL%" (
+    echo [*] privacy-core DLL OK.
+    "%VENV_PY%" "%ROOT%\scripts\refresh_privacy_core_pin.py"
+    if errorlevel 1 (
+        echo [!] WARNING: privacy-core trust pin refresh failed. Startup may fail if backend\.env pins an old hash.
+        echo.
+    )
+)
 
 cd /d "%ROOT%"
 
