@@ -4,7 +4,9 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, ExternalLink, Key, Shield, Radar, Globe, Satellite, Ship, Radio } from 'lucide-react';
 
-const STORAGE_KEY = 'shadowbroker_onboarding_complete';
+const CURRENT_ONBOARDING_VERSION = '0.9.7';
+const STORAGE_KEY = `shadowbroker_onboarding_complete_v${CURRENT_ONBOARDING_VERSION}`;
+const LEGACY_STORAGE_KEY = 'shadowbroker_onboarding_complete';
 
 const API_GUIDES = [
   {
@@ -62,11 +64,13 @@ const OnboardingModal = React.memo(function OnboardingModal({
 
   const handleDismiss = () => {
     localStorage.setItem(STORAGE_KEY, 'true');
+    localStorage.setItem(LEGACY_STORAGE_KEY, 'true');
     onClose();
   };
 
   const handleOpenSettings = () => {
     localStorage.setItem(STORAGE_KEY, 'true');
+    localStorage.setItem(LEGACY_STORAGE_KEY, 'true');
     onClose();
     onOpenSettings();
   };
@@ -123,7 +127,7 @@ const OnboardingModal = React.memo(function OnboardingModal({
 
           {/* Step Indicators */}
           <div className="flex gap-2 px-6 pt-4">
-            {['Welcome', 'API Keys', 'Free Sources'].map((label, i) => (
+            {['API Keys', 'Trust Modes', 'Free Sources'].map((label, i) => (
               <button
                 key={label}
                 onClick={() => setStep(i)}
@@ -140,36 +144,23 @@ const OnboardingModal = React.memo(function OnboardingModal({
 
           {/* Content */}
           <div className="flex-1 overflow-y-auto styled-scrollbar p-6">
-            {step === 0 && (
+            {step === 1 && (
               <div className="space-y-4">
                 <div className="text-center py-4">
                   <div className="text-lg font-bold tracking-[0.3em] text-[var(--text-primary)] font-mono mb-2">
-                    S H A D O W <span className="text-cyan-400">B R O K E R</span>
+                    T R U S T <span className="text-cyan-400">M O D E S</span>
                   </div>
-                  <p className="text-[11px] text-[var(--text-secondary)] font-mono leading-relaxed max-w-md mx-auto">
+                  <p className="hidden">
                     Real-time OSINT dashboard aggregating 12+ live intelligence sources. Flights,
                     ships, satellites, earthquakes, conflicts, and more — all on one map.
                   </p>
+                  <p className="text-[11px] text-[var(--text-secondary)] font-mono leading-relaxed max-w-md mx-auto">
+                    These modes explain what lane the network is using. Set up the API keys first,
+                    then use this screen to understand public mesh versus private Wormhole paths.
+                  </p>
                 </div>
 
-                <div className="bg-yellow-950/20 border border-yellow-500/20 p-4">
-                  <div className="flex items-start gap-2">
-                    <Key size={14} className="text-yellow-500 mt-0.5 flex-shrink-0" />
-                    <div>
-                      <p className="text-[11px] text-yellow-400 font-mono font-bold mb-1">
-                        API Keys Required
-                      </p>
-                      <p className="text-sm text-[var(--text-secondary)] font-mono leading-relaxed">
-                        Two API keys are needed for full functionality:{' '}
-                        <span className="text-cyan-400">OpenSky Network</span> (flights) and{' '}
-                        <span className="text-blue-400">AIS Stream</span> (ships). Both are free.
-                        Without them, some panels will show no data.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-green-950/20 border border-green-500/20 p-4">
+                <div className="hidden">
                   <div className="flex items-start gap-2">
                     <Globe size={14} className="text-green-500 mt-0.5 flex-shrink-0" />
                     <div>
@@ -216,8 +207,24 @@ const OnboardingModal = React.memo(function OnboardingModal({
               </div>
             )}
 
-            {step === 1 && (
+            {step === 0 && (
               <div className="space-y-4">
+                <div className="bg-yellow-950/20 border border-yellow-500/20 p-4">
+                  <div className="flex items-start gap-2">
+                    <Key size={14} className="text-yellow-500 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="text-[11px] text-yellow-400 font-mono font-bold mb-1">
+                        START HERE
+                      </p>
+                      <p className="text-sm text-[var(--text-secondary)] font-mono leading-relaxed">
+                        OpenSky Network and AIS Stream are the free keys that make ShadowBroker
+                        useful immediately: live aircraft and vessel tracking. Add these first;
+                        trust modes and the no-key sources can come next.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
                 {API_GUIDES.map((api) => (
                   <div
                     key={api.name}
@@ -272,7 +279,8 @@ const OnboardingModal = React.memo(function OnboardingModal({
               <div className="space-y-3">
                 <p className="text-sm text-[var(--text-secondary)] font-mono mb-3">
                   These data sources are completely free and require no API keys. They activate
-                  automatically on launch.
+                  automatically on launch, while OpenSky and AIS Stream unlock the richer live
+                  aviation and maritime experience.
                 </p>
                 <div className="grid grid-cols-2 gap-2">
                   {FREE_SOURCES.map((src) => (

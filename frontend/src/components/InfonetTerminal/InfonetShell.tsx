@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Terminal, Radio, Globe, Key, LogOut, Activity, Vote, User, ArrowRightLeft, Briefcase, Mail, Brain, GitBranch, Cpu, KeyRound } from 'lucide-react';
+import { Terminal, Radio, Globe, Key, Activity, Vote, User, ArrowRightLeft, Briefcase, Mail, Brain, GitBranch, Cpu, KeyRound } from 'lucide-react';
 import { getNodeIdentity, getWormholeIdentityDescriptor } from '@/mesh/meshIdentity';
 import {
   activateWormholeGatePersona,
@@ -128,7 +128,6 @@ const SECTIONS = [
   { name: 'EXCHANGE', icon: <ArrowRightLeft size={14} className="mr-2" /> },
   { name: 'PROFILE', icon: <User size={14} className="mr-2" /> },
   { name: 'MESSAGES', icon: <Mail size={14} className="mr-2" /> },
-  { name: 'EXIT', icon: <LogOut size={14} className="mr-2" /> },
 ];
 
 interface CommandHistory {

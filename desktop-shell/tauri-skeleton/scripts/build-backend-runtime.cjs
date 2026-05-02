@@ -2,11 +2,13 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const scriptDir = __dirname;
 const tauriDir = path.resolve(scriptDir, '..');
 const repoRoot = path.resolve(tauriDir, '..', '..');
 const backendDir = path.join(repoRoot, 'backend');
+const privacyCoreDir = path.join(repoRoot, 'privacy-core');
 const outputDir = path.join(tauriDir, 'src-tauri', 'backend-runtime');
 const venvMarkerPath = path.join(backendDir, '.venv-dir');
 const releaseAttestationPath = path.join(backendDir, 'data', 'release_attestation.json');
@@ -77,13 +79,56 @@ function ensureRuntimePrereqs() {
   }
 }
 
+function privacyCoreArtifactName() {
+  if (process.platform === 'win32') return 'privacy_core.dll';
+  if (process.platform === 'darwin') return 'libprivacy_core.dylib';
+  return 'libprivacy_core.so';
+}
+
+function privacyCoreArtifactPath() {
+  return path.join(privacyCoreDir, 'target', 'release', privacyCoreArtifactName());
+}
+
+function ensurePrivacyCoreArtifact() {
+  const artifact = privacyCoreArtifactPath();
+  if (fs.existsSync(artifact)) {
+    return artifact;
+  }
+  console.log('privacy-core release library missing; building it for desktop packaging...');
+  const result = spawnSync(
+    'cargo',
+    ['build', '--release', '--manifest-path', path.join(privacyCoreDir, 'Cargo.toml')],
+    {
+      cwd: repoRoot,
+      env: process.env,
+      stdio: 'inherit',
+    },
+  );
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      'Failed to build privacy-core release library. Install Rust/Cargo and rerun the desktop build.',
+    );
+  }
+  if (!fs.existsSync(artifact)) {
+    throw new Error(`privacy-core build completed but artifact is missing: ${artifact}`);
+  }
+  return artifact;
+}
+
 function stageBackendRuntime() {
   fs.rmSync(outputDir, { recursive: true, force: true });
   fs.cpSync(backendDir, outputDir, {
     recursive: true,
     filter: shouldCopy,
   });
+  stagePrivacyCoreArtifact();
   stageReleaseAttestation();
+}
+
+function stagePrivacyCoreArtifact() {
+  const artifact = ensurePrivacyCoreArtifact();
+  const stagedPath = path.join(outputDir, path.basename(artifact));
+  fs.copyFileSync(artifact, stagedPath);
 }
 
 function stageReleaseAttestation() {

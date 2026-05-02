@@ -104,6 +104,8 @@ def _match_prediction_markets(title: str, markets: list[dict]) -> dict | None:
         "kalshi_pct": best_match.get("kalshi_pct"),
         "consensus_pct": best_match.get("consensus_pct"),
         "match_score": round(best_score, 2),
+        "slug": best_match.get("slug", ""),
+        "kalshi_ticker": best_match.get("kalshi_ticker", ""),
     }
 
 

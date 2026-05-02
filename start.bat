@@ -84,6 +84,9 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000 "') do (
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3000 "') do (
     taskkill /F /PID %%a >nul 2>&1
 )
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8787 "') do (
+    taskkill /F /PID %%a >nul 2>&1
+)
 
 :: Brief pause to let OS release the ports
 timeout /t 1 /nobreak >nul
@@ -97,6 +100,11 @@ if %errorlevel% equ 0 (
 netstat -ano | findstr ":3000 " | findstr "LISTENING" >nul 2>&1
 if %errorlevel% equ 0 (
     echo [!] WARNING: Port 3000 is still occupied! Waiting 3s for OS cleanup...
+    timeout /t 3 /nobreak >nul
+)
+netstat -ano | findstr ":8787 " | findstr "LISTENING" >nul 2>&1
+if %errorlevel% equ 0 (
+    echo [!] WARNING: Port 8787 is still occupied! Waiting 3s for OS cleanup...
     timeout /t 3 /nobreak >nul
 )
 
@@ -225,6 +233,33 @@ if not exist "node_modules\ws" (
     call npm ci --omit=dev --silent
 )
 echo [*] Backend Node.js dependencies OK.
+
+echo.
+echo [*] Checking privacy-core shared library...
+set "PRIVACY_CORE_DLL=%ROOT%\privacy-core\target\release\privacy_core.dll"
+if not exist "%PRIVACY_CORE_DLL%" (
+    where cargo >nul 2>&1
+    if errorlevel 1 (
+        echo [!] WARNING: privacy-core DLL is missing and Rust/Cargo is not installed.
+        echo [!] Infonet private lanes and gates need this library.
+        echo [!] Install Rust from https://rustup.rs/ and run:
+        echo [!]   cargo build --release --manifest-path "%ROOT%\privacy-core\Cargo.toml"
+        echo.
+    ) else (
+        echo [*] Building privacy-core release DLL...
+        cd /d "%ROOT%"
+        cargo build --release --manifest-path "%ROOT%\privacy-core\Cargo.toml"
+        if errorlevel 1 (
+            echo [!] ERROR: privacy-core build failed. Infonet private lanes need this DLL.
+            echo.
+            pause
+            exit /b 1
+        )
+        cd /d "%ROOT%\backend"
+    )
+)
+if exist "%PRIVACY_CORE_DLL%" echo [*] privacy-core DLL OK.
+
 cd /d "%ROOT%"
 
 echo.

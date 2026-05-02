@@ -635,6 +635,8 @@ export interface NewsArticle {
     kalshi_pct: number | null;
     consensus_pct: number | null;
     match_score: number;
+    slug?: string;
+    kalshi_ticker?: string;
   } | null;
 }
 

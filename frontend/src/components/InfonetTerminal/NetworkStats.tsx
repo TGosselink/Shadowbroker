@@ -32,12 +32,22 @@ export default function NetworkStats() {
           fetchInfonetNodeStatusSnapshot(true).catch(() => null),
         ]);
         if (!alive) return;
+        const knownNodes = Number(infonet?.known_nodes || 0);
+        const syncPeerCount = Number(infonet?.bootstrap?.sync_peer_count || 0);
+        const defaultSyncPeerCount = Number(infonet?.bootstrap?.default_sync_peer_count || 0);
+        const lastPeerUrl = String(infonet?.sync_runtime?.last_peer_url || '').trim();
+        const visibleInfonetNodes = Math.max(
+          knownNodes,
+          syncPeerCount,
+          defaultSyncPeerCount,
+          lastPeerUrl ? 1 : 0,
+        );
         setStats({
           meshtastic: Number(channelsRes?.total_live || channelsRes?.total_nodes || meshRes?.signal_counts?.meshtastic || 0),
           aprs: Number(meshRes?.signal_counts?.aprs || 0),
-          infonetNodes: Number(infonet?.known_nodes || 0),
+          infonetNodes: visibleInfonetNodes,
           infonetEvents: Number(infonet?.total_events || 0),
-          syncPeers: Number(infonet?.bootstrap?.sync_peer_count || 0),
+          syncPeers: syncPeerCount,
           nodeEnabled: Boolean(infonet?.node_enabled),
           syncOutcome: String(infonet?.sync_runtime?.last_outcome || 'offline').toLowerCase(),
         });

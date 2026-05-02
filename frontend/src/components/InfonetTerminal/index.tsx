@@ -2,7 +2,7 @@
 
 import React, { useEffect } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { X, Minus } from 'lucide-react';
+import { X } from 'lucide-react';
 import InfonetShell from './InfonetShell';
 
 interface InfonetTerminalProps {
@@ -55,13 +55,6 @@ export default function InfonetTerminal({
                 </span>
               </div>
               <div className="flex items-center gap-1">
-                <button
-                  onClick={onClose}
-                  className="p-1 text-gray-600 hover:text-gray-300 transition-colors"
-                  title="Minimize"
-                >
-                  <Minus size={14} />
-                </button>
                 <button
                   onClick={onClose}
                   className="p-1 text-gray-600 hover:text-red-400 transition-colors"

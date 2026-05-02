@@ -64,7 +64,7 @@ echo ""
 echo "[*] Clearing zombie processes..."
 
 # Kill anything listening on ports 8000 or 3000
-for PORT in 8000 3000; do
+for PORT in 8000 3000 8787; do
     if command -v lsof &> /dev/null; then
         PIDS=$(lsof -ti :$PORT 2>/dev/null)
     elif command -v ss &> /dev/null; then
@@ -82,6 +82,7 @@ done
 # Kill orphaned uvicorn and ais_proxy processes
 pkill -9 -f "uvicorn.*main:app" 2>/dev/null
 pkill -9 -f "ais_proxy" 2>/dev/null
+pkill -9 -f "wormhole_server.py" 2>/dev/null
 
 # Brief pause for OS to release ports
 sleep 1
@@ -191,6 +192,30 @@ if [ ! -d "node_modules/ws" ]; then
     npm ci --omit=dev --silent
 fi
 echo "[*] Backend Node.js dependencies OK."
+
+echo ""
+echo "[*] Checking privacy-core shared library..."
+PRIVACY_CORE_SO="$SCRIPT_DIR/privacy-core/target/release/libprivacy_core.so"
+PRIVACY_CORE_DYLIB="$SCRIPT_DIR/privacy-core/target/release/libprivacy_core.dylib"
+if [ ! -f "$PRIVACY_CORE_SO" ] && [ ! -f "$PRIVACY_CORE_DYLIB" ]; then
+    if command -v cargo >/dev/null 2>&1; then
+        echo "[*] Building privacy-core release library..."
+        cargo build --release --manifest-path "$SCRIPT_DIR/privacy-core/Cargo.toml"
+        if [ $? -ne 0 ]; then
+            echo "[!] ERROR: privacy-core build failed. Infonet private lanes need this library."
+            exit 1
+        fi
+    else
+        echo "[!] WARNING: privacy-core shared library is missing and Rust/Cargo is not installed."
+        echo "[!] Infonet private lanes and gates need this library."
+        echo "[!] Install Rust from https://rustup.rs/ and run:"
+        echo "[!]   cargo build --release --manifest-path \"$SCRIPT_DIR/privacy-core/Cargo.toml\""
+        echo ""
+    fi
+fi
+if [ -f "$PRIVACY_CORE_SO" ] || [ -f "$PRIVACY_CORE_DYLIB" ]; then
+    echo "[*] privacy-core shared library OK."
+fi
 
 cd "$SCRIPT_DIR"
 

@@ -16,7 +16,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import { computeNightPolygon } from '@/utils/solarTerminator';
 import { darkStyle, lightStyle } from '@/components/map/styles/mapStyles';
 import maplibregl from 'maplibre-gl';
-import { AlertTriangle, Radio, Activity, Play, Satellite } from 'lucide-react';
+import { AlertTriangle, Radio, Activity, Play, Satellite, ExternalLink, Info } from 'lucide-react';
 import WikiImage from '@/components/WikiImage';
 import FishingDestinationRoute from '@/components/map/FishingDestinationRoute';
 import { useTheme } from '@/lib/ThemeContext';
@@ -291,6 +291,15 @@ function probeRasterTile(url: string): Promise<boolean> {
     img.referrerPolicy = 'no-referrer';
     img.src = url;
   });
+}
+
+function buildPolymarketUrl(prediction: { slug?: string; title?: string } | null | undefined): string {
+  const slug = String(prediction?.slug || '').trim();
+  if (slug) return `https://polymarket.com/event/${encodeURIComponent(slug)}`;
+  const title = String(prediction?.title || '').trim();
+  return title
+    ? `https://polymarket.com/search?query=${encodeURIComponent(title)}`
+    : 'https://polymarket.com/markets';
 }
 
 const MaplibreViewer = ({
@@ -5712,29 +5721,56 @@ const MaplibreViewer = ({
                   <div className="px-5 pb-3">
                     <div className="grid grid-cols-3 gap-2">
                       {/* Oracle Score */}
-                      <div className={`border rounded p-3 text-center ${oTierBg || 'bg-black/40 border-cyan-800/30'}`}>
-                        <div className="text-[9px] text-[var(--text-muted)] tracking-[0.15em] mb-1.5">ORACLE SCORE</div>
+                      <label className={`border rounded p-3 text-center transition-colors hover:border-white/40 cursor-pointer ${oTierBg || 'bg-black/40 border-cyan-800/30'}`}>
+                        <input type="checkbox" className="peer sr-only" aria-label="Explain Oracle Score" />
+                        <div className="flex items-center justify-center gap-1 text-[9px] text-[var(--text-muted)] tracking-[0.15em] mb-1.5">
+                          <span>ORACLE SCORE</span>
+                          <Info size={10} />
+                        </div>
                         <div className={`text-[28px] font-bold leading-none ${oTierColor || 'text-gray-500'}`}>
                           {oScore != null ? oScore.toFixed(1) : '—'}
                         </div>
                         {oTier && <div className={`text-[10px] font-bold ${oTierColor} mt-1`}>{oTier}</div>}
-                      </div>
+                        <div className="hidden peer-checked:block mt-2 border-t border-white/10 pt-2 text-left text-[10px] leading-relaxed text-cyan-100">
+                          <div className="text-cyan-400 font-bold tracking-[0.16em] mb-1">SCALE</div>
+                          <p>0-10 weighted signal score combining alert risk and source confidence.</p>
+                          <p className="mt-1 text-[var(--text-muted)]">0-3 low, 4-5 moderate, 6-7 elevated, 8-10 critical.</p>
+                        </div>
+                      </label>
                       {/* Sentiment */}
-                      <div className={`border rounded p-3 text-center ${sentBg || 'bg-black/40 border-cyan-800/30'}`}>
-                        <div className="text-[9px] text-[var(--text-muted)] tracking-[0.15em] mb-1.5">SENTIMENT</div>
+                      <label className={`border rounded p-3 text-center transition-colors hover:border-white/40 cursor-pointer ${sentBg || 'bg-black/40 border-cyan-800/30'}`}>
+                        <input type="checkbox" className="peer sr-only" aria-label="Explain Sentiment" />
+                        <div className="flex items-center justify-center gap-1 text-[9px] text-[var(--text-muted)] tracking-[0.15em] mb-1.5">
+                          <span>SENTIMENT</span>
+                          <Info size={10} />
+                        </div>
                         <div className={`text-[28px] font-bold leading-none ${sentColor || 'text-gray-500'}`}>
                           {sent != null ? <>{sentArrow} {sent > 0 ? '+' : ''}{sent.toFixed(2)}</> : '—'}
                         </div>
                         {sentLabel && <div className={`text-[10px] font-bold ${sentColor} mt-1`}>{sentLabel}</div>}
-                      </div>
+                        <div className="hidden peer-checked:block mt-2 border-t border-white/10 pt-2 text-left text-[10px] leading-relaxed text-cyan-100">
+                          <div className="text-cyan-400 font-bold tracking-[0.16em] mb-1">SCALE</div>
+                          <p>-1.00 to +1.00 headline tone. Negative reads more adverse; positive reads more constructive.</p>
+                          <p className="mt-1 text-[var(--text-muted)]">Below -0.10 negative, -0.10 to +0.10 neutral, above +0.10 positive. It measures tone, not truth.</p>
+                        </div>
+                      </label>
                       {/* Threat Level */}
-                      <div className={`border rounded p-3 text-center ${rs >= 8 ? 'bg-red-500/10 border-red-500/30' : rs >= 6 ? 'bg-orange-500/10 border-orange-500/30' : rs >= 4 ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-green-500/10 border-green-500/30'}`}>
-                        <div className="text-[9px] text-[var(--text-muted)] tracking-[0.15em] mb-1.5">RISK LEVEL</div>
+                      <label className={`border rounded p-3 text-center transition-colors hover:border-white/40 cursor-pointer ${rs >= 8 ? 'bg-red-500/10 border-red-500/30' : rs >= 6 ? 'bg-orange-500/10 border-orange-500/30' : rs >= 4 ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-green-500/10 border-green-500/30'}`}>
+                        <input type="checkbox" className="peer sr-only" aria-label="Explain Risk Level" />
+                        <div className="flex items-center justify-center gap-1 text-[9px] text-[var(--text-muted)] tracking-[0.15em] mb-1.5">
+                          <span>RISK LEVEL</span>
+                          <Info size={10} />
+                        </div>
                         <div className={`text-[28px] font-bold leading-none ${threatColor}`}>{rs}/10</div>
                         <div className={`text-[10px] font-bold ${threatColor} mt-1`}>
                           {rs >= 9 ? 'CRITICAL' : rs >= 7 ? 'HIGH' : rs >= 4 ? 'MEDIUM' : 'LOW'}
                         </div>
-                      </div>
+                        <div className="hidden peer-checked:block mt-2 border-t border-white/10 pt-2 text-left text-[10px] leading-relaxed text-cyan-100">
+                          <div className="text-cyan-400 font-bold tracking-[0.16em] mb-1">SCALE</div>
+                          <p>0-10 operational severity estimate based on source, topic, keywords, corroboration, and alert context.</p>
+                          <p className="mt-1 text-[var(--text-muted)]">0-3 low, 4-6 medium, 7-8 high, 9-10 critical.</p>
+                        </div>
+                      </label>
                     </div>
                   </div>
 
@@ -5742,8 +5778,20 @@ const MaplibreViewer = ({
                   {pred && pred.consensus_pct != null && (
                     <div className="px-5 pb-3">
                       <div className="bg-purple-950/30 border border-purple-500/40 rounded p-4">
-                        <div className="text-[10px] text-purple-400 tracking-[0.2em] font-bold mb-2">
-                          PREDICTION MARKET ANALYSIS
+                        <div className="flex items-center justify-between gap-3 mb-2">
+                          <div className="text-[10px] text-purple-400 tracking-[0.2em] font-bold">
+                            PREDICTION MARKET ANALYSIS
+                          </div>
+                          {pred.polymarket_pct != null && (
+                            <button
+                              type="button"
+                              onClick={() => window.open(buildPolymarketUrl(pred), '_blank', 'noopener,noreferrer')}
+                              className="inline-flex items-center gap-1 text-[10px] text-purple-200 hover:text-white border border-purple-500/30 hover:border-purple-300/70 px-2 py-1 rounded transition-colors"
+                              title="Open this market on Polymarket"
+                            >
+                              POLYMARKET <ExternalLink size={10} />
+                            </button>
+                          )}
                         </div>
                         <div className="text-[14px] text-purple-200 font-bold leading-snug mb-3">
                           &quot;{pred.title}&quot;
@@ -5760,10 +5808,16 @@ const MaplibreViewer = ({
                         </div>
                         <div className="flex gap-6 text-[11px]">
                           {pred.polymarket_pct != null && (
-                            <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => window.open(buildPolymarketUrl(pred), '_blank', 'noopener,noreferrer')}
+                              className="flex items-center gap-2 hover:text-white transition-colors"
+                              title="Open this market on Polymarket"
+                            >
                               <span className="text-purple-400/70">Polymarket</span>
                               <span className="text-white font-bold text-[13px]">{pred.polymarket_pct}%</span>
-                            </div>
+                              <ExternalLink size={10} className="text-purple-400/70" />
+                            </button>
                           )}
                           {pred.kalshi_pct != null && (
                             <div className="flex items-center gap-2">
@@ -5834,7 +5888,7 @@ const MaplibreViewer = ({
                         onClick={() => window.open(item.link, '_blank', 'noopener,noreferrer')}
                         className={`${threatColor} hover:text-white text-[12px] font-bold underline underline-offset-2 cursor-pointer`}
                       >
-                        VIEW FULL REPORT ↗
+                        GO TO ARTICLE ↗
                       </button>
                     ) : <span />}
                     <button

@@ -91,7 +91,8 @@ pub async fn ensure_and_start_managed_backend(
         .open(&stderr_log)
         .map_err(|e| format!("managed_backend_stderr_log_failed:{e}"))?;
 
-    let mut child = Command::new(&python_bin)
+    let mut command = Command::new(&python_bin);
+    command
         .current_dir(&runtime_root)
         .arg("-m")
         .arg("uvicorn")
@@ -103,7 +104,13 @@ pub async fn ensure_and_start_managed_backend(
         .arg("--timeout-keep-alive")
         .arg("120")
         .env("PYTHONUNBUFFERED", "1")
-        .env("SB_DATA_DIR", data_dir.as_os_str())
+        .env("SB_DATA_DIR", data_dir.as_os_str());
+
+    if let Some(privacy_core_lib) = bundled_privacy_core_lib(&runtime_root) {
+        command.env("PRIVACY_CORE_LIB", privacy_core_lib.as_os_str());
+    }
+
+    let mut child = command
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn()
@@ -189,6 +196,18 @@ fn sync_release_attestation(bundled_root: &Path, install_root: &Path) -> Result<
     fs::copy(&bundled_path, &installed_path)
         .map_err(|e| format!("managed_backend_attestation_copy_failed:{e}"))?;
     Ok(())
+}
+
+fn bundled_privacy_core_lib(runtime_root: &Path) -> Option<PathBuf> {
+    let file_name = if cfg!(target_os = "windows") {
+        "privacy_core.dll"
+    } else if cfg!(target_os = "macos") {
+        "libprivacy_core.dylib"
+    } else {
+        "libprivacy_core.so"
+    };
+    let candidate = runtime_root.join(file_name);
+    candidate.exists().then_some(candidate)
 }
 
 fn release_attestation_path(root: &Path) -> PathBuf {
