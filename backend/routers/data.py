@@ -324,8 +324,19 @@ async def update_layers(update: LayerUpdate, request: Request):
         sigint_grid.mesh.stop()
         logger.info("Meshtastic MQTT bridge stopped (layer disabled)")
     elif not old_mesh and new_mesh:
-        sigint_grid.mesh.start()
-        logger.info("Meshtastic MQTT bridge started (layer enabled)")
+        try:
+            from services.config import get_settings
+            mqtt_enabled = bool(getattr(get_settings(), "MESH_MQTT_ENABLED", False))
+        except Exception:
+            mqtt_enabled = False
+        if mqtt_enabled:
+            sigint_grid.mesh.start()
+            logger.info("Meshtastic MQTT bridge started (layer enabled)")
+        else:
+            logger.info(
+                "Meshtastic layer enabled; MQTT bridge remains disabled "
+                "(set MESH_MQTT_ENABLED=true to participate in the public broker)"
+            )
     if old_aprs and not new_aprs:
         sigint_grid.aprs.stop()
         logger.info("APRS bridge stopped (layer disabled)")

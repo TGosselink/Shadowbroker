@@ -8,8 +8,11 @@ export interface HlsVideoHandle {
   get paused(): boolean;
 }
 
-const HlsVideo = forwardRef<HlsVideoHandle, { url: string; className?: string; onError?: () => void }>(
-  ({ url, className, onError }, ref) => {
+const HlsVideo = forwardRef<
+  HlsVideoHandle,
+  { url: string; className?: string; onError?: () => void; onLoaded?: () => void }
+>(
+  ({ url, className, onError, onLoaded }, ref) => {
     const videoRef = useRef<HTMLVideoElement>(null);
 
     useImperativeHandle(ref, () => ({
@@ -35,6 +38,7 @@ const HlsVideo = forwardRef<HlsVideoHandle, { url: string; className?: string; o
           hls.on(Hls.Events.ERROR, (_e: unknown, data: { fatal?: boolean }) => {
             if (data.fatal) onError?.();
           });
+          hls.on(Hls.Events.MANIFEST_PARSED, () => onLoaded?.());
           hls.loadSource(url);
           hls.attachMedia(video);
           hlsInstance = hls;
@@ -47,7 +51,7 @@ const HlsVideo = forwardRef<HlsVideoHandle, { url: string; className?: string; o
         cancelled = true;
         hlsInstance?.destroy();
       };
-    }, [url, onError]);
+    }, [url, onError, onLoaded]);
 
     return (
       <video
@@ -56,6 +60,9 @@ const HlsVideo = forwardRef<HlsVideoHandle, { url: string; className?: string; o
         muted
         playsInline
         onError={() => onError?.()}
+        onCanPlay={() => onLoaded?.()}
+        onLoadedData={() => onLoaded?.()}
+        onPlaying={() => onLoaded?.()}
         className={className}
       />
     );

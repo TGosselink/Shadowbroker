@@ -313,6 +313,7 @@ export function useMeshChatController({
   const [identityWizardBusy, setIdentityWizardBusy] = useState(false);
   const [identityWizardStatus, setIdentityWizardStatus] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [meshQuickStatus, setMeshQuickStatus] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [meshSessionActive, setMeshSessionActive] = useState(false);
   const [publicMeshAddress, setPublicMeshAddress] = useState('');
   const [meshView, setMeshView] = useState<'channel' | 'inbox'>('channel');
   const [meshDirectTarget, setMeshDirectTarget] = useState('');
@@ -328,12 +329,14 @@ export function useMeshChatController({
   const [recentPrivateFallbackReason, setRecentPrivateFallbackReason] = useState('');
   const [unresolvedSenderSealCount, setUnresolvedSenderSealCount] = useState(0);
   const [privacyProfile, setPrivacyProfile] = useState<'default' | 'high'>('default');
-  const publicIdentity = clientHydrated ? getNodeIdentity() : null;
-  const hasPublicLaneIdentity = clientHydrated && Boolean(publicIdentity) && hasSovereignty();
+  const storedPublicIdentity = clientHydrated ? getNodeIdentity() : null;
+  const hasStoredPublicLaneIdentity = clientHydrated && Boolean(storedPublicIdentity) && hasSovereignty();
+  const publicIdentity = meshSessionActive ? storedPublicIdentity : null;
+  const hasPublicLaneIdentity = meshSessionActive && hasStoredPublicLaneIdentity;
   const hasId = Boolean(identity) && (hasSovereignty() || wormholeEnabled);
   const shouldShowIdentityWarning = activeTab !== 'meshtastic' && !hasId;
   const privateInfonetReady = wormholeEnabled && wormholeReadyState;
-  const publicMeshBlockedByWormhole = wormholeEnabled && wormholeReadyState && !hasPublicLaneIdentity;
+  const publicMeshBlockedByWormhole = wormholeEnabled || wormholeReadyState;
   const dmSendQueue = useRef<(() => Promise<void>)[]>([]);
   const dmSendTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamEnabledForSelectedGateRef = useRef(false);
@@ -364,6 +367,13 @@ export function useMeshChatController({
   useEffect(() => {
     setClientHydrated(true);
   }, []);
+
+  useEffect(() => {
+    if (!clientHydrated) return;
+    setMeshSessionActive(false);
+    setMeshMessages([]);
+    setMeshQuickStatus(null);
+  }, [clientHydrated]);
 
   useEffect(
     () =>
@@ -450,6 +460,8 @@ export function useMeshChatController({
           setSecureModeCached(enabled);
           setWormholeEnabled(enabled);
           if (enabled) {
+            setMeshSessionActive(false);
+            setMeshMessages([]);
             purgeBrowserContactGraph();
             void hydrateWormholeContacts();
           }
@@ -515,7 +527,7 @@ export function useMeshChatController({
 
   useEffect(() => {
     let alive = true;
-    const senderId = publicIdentity?.nodeId || '';
+    const senderId = storedPublicIdentity?.nodeId || '';
     if (!senderId || !globalThis.crypto?.subtle) {
       setPublicMeshAddress('');
       return;
@@ -530,7 +542,7 @@ export function useMeshChatController({
     return () => {
       alive = false;
     };
-  }, [publicIdentity?.nodeId]);
+  }, [storedPublicIdentity?.nodeId]);
 
   const flushDmQueue = useCallback(async () => {
     const queue = dmSendQueue.current.splice(0);
@@ -1138,10 +1150,10 @@ export function useMeshChatController({
     [meshMessages, mutedUsers],
   );
   const meshInboxMessages = useMemo(() => {
-    if (!publicMeshAddress) return [];
+    if (!meshSessionActive || !publicMeshAddress) return [];
     const target = publicMeshAddress.toLowerCase();
     return filteredMeshMessages.filter((m) => String(m.to || '').toLowerCase() === target);
-  }, [filteredMeshMessages, publicMeshAddress]);
+  }, [filteredMeshMessages, meshSessionActive, publicMeshAddress]);
 
   // ─── InfoNet Polling ─────────────────────────────────────────────────────
 
@@ -1735,7 +1747,7 @@ export function useMeshChatController({
 
   // ─── Meshtastic Channel Discovery ──────────────────────────────────────
   useEffect(() => {
-    if (!expanded || activeTab !== 'meshtastic') return;
+    if (!expanded || activeTab !== 'meshtastic' || !meshSessionActive) return;
     let cancelled = false;
     const fetchChannels = async () => {
       try {
@@ -1794,12 +1806,12 @@ export function useMeshChatController({
       cancelled = true;
       clearInterval(iv);
     };
-  }, [expanded, activeTab, meshRegion]);
+  }, [expanded, activeTab, meshRegion, meshSessionActive]);
 
   // ─── Meshtastic Polling ──────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!expanded || activeTab !== 'meshtastic') return;
+    if (!expanded || activeTab !== 'meshtastic' || !meshSessionActive) return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -1823,7 +1835,13 @@ export function useMeshChatController({
       cancelled = true;
       clearInterval(iv);
     };
-  }, [expanded, activeTab, meshRegion, meshChannel, meshView]);
+  }, [expanded, activeTab, meshRegion, meshChannel, meshView, meshSessionActive]);
+
+  useEffect(() => {
+    if (meshSessionActive) return;
+    setMeshMessages([]);
+    setMeshQuickStatus(null);
+  }, [meshSessionActive]);
 
   // ─── DM Polling ──────────────────────────────────────────────────────────
 
@@ -2305,7 +2323,8 @@ export function useMeshChatController({
 
   const handleSend = async () => {
     const msg = inputValue.trim();
-    if (!msg || !hasId || busy) return;
+    if (!msg || busy) return;
+    if (activeTab !== 'meshtastic' && !hasId) return;
 
     const cooldownMs = activeTab === 'dms' ? 0 : 30_000;
     const now = Date.now();
@@ -2392,13 +2411,15 @@ export function useMeshChatController({
         ]);
         setGateReplyContext(null);
         } else if (activeTab === 'meshtastic') {
-          if (!publicIdentity || !hasSovereignty()) {
+          if (!meshSessionActive || !publicIdentity || !hasSovereignty()) {
             setInputValue(msg);
             setLastSendTime(0);
-            setSendError('public mesh identity needed');
+            setSendError(meshSessionActive ? 'public mesh identity needed' : 'meshchat is off');
             openIdentityWizard({
               type: 'err',
-              text: 'Quick fix: create a public mesh identity below, then retry your send.',
+              text: hasStoredPublicLaneIdentity
+                ? 'Quick fix: turn MeshChat on below, then retry your send.'
+                : 'Quick fix: create a public mesh identity below, then retry your send.',
             });
             setTimeout(() => setSendError(''), 4000);
             setBusy(false);
@@ -3959,16 +3980,36 @@ export function useMeshChatController({
     [inputDisabled],
   );
 
+  const disableWormholeForPublicMesh = useCallback(async () => {
+    const requireBackendLeave = wormholeEnabled || wormholeReadyState;
+    try {
+      await leaveWormhole();
+    } catch (err) {
+      if (requireBackendLeave) {
+        throw err;
+      }
+    }
+    setWormholeEnabled(false);
+    setWormholeReadyState(false);
+    setWormholeRnsReady(false);
+    setWormholeRnsDirectReady(false);
+    setWormholeRnsPeers({ active: 0, configured: 0 });
+    setSecureModeCached(false);
+  }, [wormholeEnabled, wormholeReadyState]);
+
   const createPublicMeshIdentity = useCallback(
     async ({ closeWizardOnSuccess }: { closeWizardOnSuccess: boolean }) => {
       setIdentityWizardBusy(true);
       setIdentityWizardStatus(null);
       try {
+        await disableWormholeForPublicMesh();
         const nextIdentity = await generateNodeKeys();
         const nextAddress = await derivePublicMeshAddress(nextIdentity.nodeId).catch(() => '');
         const readyAddress = (nextAddress || nextIdentity.nodeId).toUpperCase();
         setIdentity(nextIdentity);
         setPublicMeshAddress(nextAddress || nextIdentity.nodeId);
+        setMeshSessionActive(true);
+        setMeshMessages([]);
         setSendError('');
         const successText = `Mesh key ready. Address ${readyAddress} is live for this testnet session.`;
         setIdentityWizardStatus({
@@ -3997,7 +4038,7 @@ export function useMeshChatController({
         setIdentityWizardBusy(false);
       }
     },
-    [],
+    [disableWormholeForPublicMesh],
   );
 
   const handleCreatePublicIdentity = useCallback(async () => {
@@ -4013,6 +4054,45 @@ export function useMeshChatController({
     }
   }, [createPublicMeshIdentity]);
 
+  const handleActivatePublicMeshSession = useCallback(async () => {
+    setIdentityWizardBusy(true);
+    setIdentityWizardStatus(null);
+    setMeshQuickStatus(null);
+    try {
+      const savedIdentity = getNodeIdentity();
+      if (!savedIdentity || !hasSovereignty()) {
+        const text = 'No saved public mesh key is available. Create a mesh key first.';
+        setMeshSessionActive(false);
+        setIdentityWizardStatus({ type: 'err', text });
+        setMeshQuickStatus({ type: 'err', text });
+        return { ok: false as const, text };
+      }
+      await disableWormholeForPublicMesh();
+      const nextAddress = await derivePublicMeshAddress(savedIdentity.nodeId).catch(() => '');
+      const readyAddress = (nextAddress || savedIdentity.nodeId).toUpperCase();
+      setIdentity(savedIdentity);
+      setPublicMeshAddress(nextAddress || savedIdentity.nodeId);
+      setMeshSessionActive(true);
+      setMeshMessages([]);
+      setSendError('');
+      const text = `MeshChat is on with saved address ${readyAddress}.`;
+      setIdentityWizardStatus({ type: 'ok', text });
+      setMeshQuickStatus({ type: 'ok', text });
+      return { ok: true as const, text };
+    } catch (err) {
+      const message =
+        typeof err === 'object' && err !== null && 'message' in err
+          ? String((err as { message?: string }).message)
+          : 'unknown error';
+      const text = `Could not turn MeshChat on: ${message}`;
+      setIdentityWizardStatus({ type: 'err', text });
+      setMeshQuickStatus({ type: 'err', text });
+      return { ok: false as const, text };
+    } finally {
+      setIdentityWizardBusy(false);
+    }
+  }, [disableWormholeForPublicMesh]);
+
   const handleReplyToMeshAddress = useCallback((address: string) => {
     const target = String(address || '').trim();
     if (!target) return;
@@ -4023,36 +4103,16 @@ export function useMeshChatController({
   }, []);
 
   const handleLeaveWormholeForPublicMesh = useCallback(async () => {
-    setIdentityWizardBusy(true);
-    setIdentityWizardStatus(null);
-    setMeshQuickStatus(null);
-    try {
-      await leaveWormhole();
-      setWormholeEnabled(false);
-      setWormholeReadyState(false);
-      setWormholeRnsReady(false);
-      setWormholeRnsDirectReady(false);
-      setWormholeRnsPeers({ active: 0, configured: 0 });
-      setSecureModeCached(false);
-      const result = await createPublicMeshIdentity({ closeWizardOnSuccess: false });
-      const status = { type: result.ok ? 'ok' as const : 'err' as const, text: result.text };
-      setIdentityWizardStatus(status);
-      setMeshQuickStatus(status);
-      if (result.ok) {
-        window.setTimeout(() => setIdentityWizardOpen(false), 900);
-      }
-    } catch (err) {
-      const message =
-        typeof err === 'object' && err !== null && 'message' in err
-          ? String((err as { message?: string }).message)
-          : 'unknown error';
-      const text = `Could not turn Wormhole off for public mesh: ${message}`;
-      setIdentityWizardStatus({ type: 'err', text });
-      setMeshQuickStatus({ type: 'err', text });
-    } finally {
-      setIdentityWizardBusy(false);
+    const result = hasStoredPublicLaneIdentity
+      ? await handleActivatePublicMeshSession()
+      : await createPublicMeshIdentity({ closeWizardOnSuccess: false });
+    const status = { type: result.ok ? 'ok' as const : 'err' as const, text: result.text };
+    setIdentityWizardStatus(status);
+    setMeshQuickStatus(status);
+    if (result.ok) {
+      window.setTimeout(() => setIdentityWizardOpen(false), 900);
     }
-  }, [createPublicMeshIdentity]);
+  }, [createPublicMeshIdentity, handleActivatePublicMeshSession, hasStoredPublicLaneIdentity]);
 
   const handleResetPublicIdentity = useCallback(async () => {
     if (wormholeEnabled && wormholeReadyState) {
@@ -4065,8 +4125,11 @@ export function useMeshChatController({
     setIdentityWizardBusy(true);
     setIdentityWizardStatus(null);
     try {
+      setMeshSessionActive(false);
+      setMeshMessages([]);
       await clearBrowserIdentityState();
       setIdentity(null);
+      setPublicMeshAddress('');
       setContacts({});
       setSelectedContact('');
       setDmMessages([]);
@@ -4091,6 +4154,8 @@ export function useMeshChatController({
   }, [wormholeEnabled, wormholeReadyState]);
 
   const handleBootstrapPrivateIdentity = useCallback(async () => {
+    setMeshSessionActive(false);
+    setMeshMessages([]);
     if (wormholeEnabled && wormholeReadyState) {
       setIdentityWizardStatus({
         type: 'ok',
@@ -4175,6 +4240,7 @@ export function useMeshChatController({
     identityWizardStatus,
     setIdentityWizardStatus,
     meshQuickStatus,
+    meshSessionActive,
     publicMeshAddress,
     meshView,
     setMeshView,
@@ -4183,6 +4249,7 @@ export function useMeshChatController({
     // Identity
     identity,
     publicIdentity,
+    hasStoredPublicLaneIdentity,
     hasPublicLaneIdentity,
     hasId,
     shouldShowIdentityWarning,
@@ -4320,6 +4387,7 @@ export function useMeshChatController({
     openChat,
     handleCreatePublicIdentity,
     handleQuickCreatePublicIdentity,
+    handleActivatePublicMeshSession,
     handleLeaveWormholeForPublicMesh,
     handleResetPublicIdentity,
     handleBootstrapPrivateIdentity,

@@ -111,6 +111,7 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
     identityWizardStatus,
     setIdentityWizardStatus,
     meshQuickStatus,
+    meshSessionActive,
     publicMeshAddress,
     meshView,
     setMeshView,
@@ -119,6 +120,7 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
     // Identity
     identity,
     publicIdentity,
+    hasStoredPublicLaneIdentity,
     hasPublicLaneIdentity,
     hasId,
     shouldShowIdentityWarning,
@@ -255,6 +257,7 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
     openChat,
     handleCreatePublicIdentity,
     handleQuickCreatePublicIdentity,
+    handleActivatePublicMeshSession,
     handleLeaveWormholeForPublicMesh,
     handleResetPublicIdentity,
     handleBootstrapPrivateIdentity,
@@ -324,6 +327,40 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
     }
     void handleRequestAccess(targetId);
   };
+  const meshActivationText =
+    meshQuickStatus?.text ||
+    (publicMeshBlockedByWormhole
+      ? hasStoredPublicLaneIdentity
+        ? 'Wormhole is active. Turning MeshChat on will turn Wormhole off and use your saved public mesh key.'
+        : 'Wormhole is active. Turning MeshChat on will turn Wormhole off and mint a separate public mesh key.'
+      : hasStoredPublicLaneIdentity
+        ? 'MeshChat is off. Turn it on to use your saved public mesh key.'
+        : 'Public mesh posting needs a mesh key. One tap gets you a fresh address.');
+  const handleMeshActivationAction = () => {
+    if (hasStoredPublicLaneIdentity) {
+      void handleActivatePublicMeshSession();
+      return;
+    }
+    if (publicMeshBlockedByWormhole) {
+      void handleLeaveWormholeForPublicMesh();
+      return;
+    }
+    void handleQuickCreatePublicIdentity();
+  };
+  const meshActivationLabel = identityWizardBusy
+    ? 'GETTING MESH KEY'
+    : hasStoredPublicLaneIdentity
+      ? 'TURN ON MESH'
+      : publicMeshBlockedByWormhole
+        ? 'TURN OFF WORMHOLE FOR MESH'
+        : 'GET MESH KEY';
+  const meshActivationSideLabel = identityWizardBusy
+    ? 'WORKING...'
+    : hasStoredPublicLaneIdentity
+      ? 'USE SAVED KEY'
+      : publicMeshBlockedByWormhole
+        ? 'AUTO DISABLE'
+        : 'ONE TAP';
 
   return (
     <div
@@ -1120,16 +1157,25 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                       </button>
                     </div>
                     <div className="text-[10px] font-mono text-[var(--text-muted)] truncate">
-                      {publicMeshAddress ? `ADDR ${publicMeshAddress.toUpperCase()}` : 'NO PUBLIC MESH ADDRESS'}
+                      {meshSessionActive && publicMeshAddress
+                        ? `ADDR ${publicMeshAddress.toUpperCase()}`
+                        : publicMeshAddress
+                          ? 'MESH OFF / KEY SAVED'
+                          : 'NO PUBLIC MESH ADDRESS'}
                     </div>
                   </div>
                   <div className="flex-1 overflow-y-auto styled-scrollbar px-3 py-1.5 border-l-2 border-cyan-800/25">
-                    {meshView === 'channel' && filteredMeshMessages.length === 0 && (
+                    {!meshSessionActive && (
+                      <div className="text-[12px] font-mono text-green-300/70 text-center py-4 leading-[1.65]">
+                        MeshChat is off. Turn it on to connect the public mesh lane.
+                      </div>
+                    )}
+                    {meshSessionActive && meshView === 'channel' && filteredMeshMessages.length === 0 && (
                       <div className="text-[12px] font-mono text-[var(--text-muted)] text-center py-4 leading-[1.65]">
                         No messages from {meshRegion} / {meshChannel}
                       </div>
                     )}
-                    {meshView === 'inbox' && (
+                    {meshSessionActive && meshView === 'inbox' && (
                       <>
                         {!publicMeshAddress && (
                           <div className="text-[12px] font-mono text-[var(--text-muted)] text-center py-4 leading-[1.65]">
@@ -2049,7 +2095,9 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                           ? meshDirectTarget
                             ? `→ MESH / TO ${meshDirectTarget.toUpperCase()}`
                             : `→ MESH / ${meshRegion} / ${meshChannel}`
-                          : '→ MESH LOCKED'
+                          : hasStoredPublicLaneIdentity
+                            ? '→ MESH OFF'
+                            : '→ MESH LOCKED'
                         : activeTab === 'dms' && secureDmBlocked
                           ? '→ DEAD DROP LOCKED'
                         : dmView === 'chat' && selectedContact
@@ -2068,10 +2116,7 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                         : 'text-green-300/70'
                   }`}
                 >
-                  {meshQuickStatus?.text ||
-                    (publicMeshBlockedByWormhole
-                      ? 'Wormhole is active. Turn it off here and we will mint a separate public mesh key for you.'
-                      : 'Public mesh posting needs a mesh key. One tap gets you a fresh address.')}
+                  {meshActivationText}
                 </div>
               )}
               <div className="flex items-center gap-2 px-3 pb-2 pt-1">
@@ -2103,30 +2148,16 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                   </button>
                 ) : activeTab === 'meshtastic' && !hasPublicLaneIdentity ? (
                   <button
-                    onClick={() => {
-                      if (publicMeshBlockedByWormhole) {
-                        void handleLeaveWormholeForPublicMesh();
-                        return;
-                      }
-                      void handleQuickCreatePublicIdentity();
-                    }}
+                    onClick={handleMeshActivationAction}
                     disabled={identityWizardBusy}
                     className="w-full flex items-center justify-between gap-2 px-3 py-2 border border-green-700/40 bg-green-950/15 text-green-300 hover:bg-green-950/25 hover:border-green-500/50 transition-colors"
                   >
                     <span className="inline-flex items-center gap-2 text-sm font-mono tracking-[0.2em]">
                       <Radio size={11} />
-                      {identityWizardBusy
-                        ? 'GETTING MESH KEY'
-                        : publicMeshBlockedByWormhole
-                          ? 'TURN OFF WORMHOLE FOR MESH'
-                          : 'GET MESH KEY'}
+                      {meshActivationLabel}
                     </span>
                     <span className="text-[12px] font-mono text-green-300/70">
-                      {identityWizardBusy
-                        ? 'WORKING...'
-                        : publicMeshBlockedByWormhole
-                          ? 'AUTO FIX'
-                          : 'ONE TAP'}
+                      {meshActivationSideLabel}
                     </span>
                   </button>
                 ) : activeTab === 'meshtastic' && meshDirectTarget ? (
@@ -2375,8 +2406,8 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                   CURRENT STATE
                 </div>
                 <div className="grid grid-cols-1 gap-1 text-[13px] font-mono text-[var(--text-secondary)] leading-[1.5]">
-                  <div>Public mesh key: {hasPublicLaneIdentity ? 'active' : 'not issued'}</div>
-                  <div>Public mesh address: {hasPublicLaneIdentity && publicMeshAddress ? publicMeshAddress.toUpperCase() : 'not ready'}</div>
+                  <div>Public mesh key: {hasPublicLaneIdentity ? 'active' : hasStoredPublicLaneIdentity ? 'saved / off' : 'not issued'}</div>
+                  <div>Public mesh address: {publicMeshAddress ? publicMeshAddress.toUpperCase() : 'not ready'}</div>
                   <div>Wormhole lane: {wormholeEnabled && wormholeReadyState ? 'active' : wormholeEnabled ? 'starting' : 'off'}</div>
                   <div>Wormhole descriptor: {wormholeDescriptor?.nodeId || 'not cached yet'}</div>
                 </div>
@@ -2385,6 +2416,10 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
               <div className="grid grid-cols-1 gap-2">
                 <button
                   onClick={() => {
+                    if (hasStoredPublicLaneIdentity) {
+                      void handleActivatePublicMeshSession();
+                      return;
+                    }
                     if (publicMeshBlockedByWormhole) {
                       void handleLeaveWormholeForPublicMesh();
                       return;
@@ -2396,12 +2431,16 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                 >
                   {hasPublicLaneIdentity
                     ? 'MESH KEY ACTIVE'
+                    : hasStoredPublicLaneIdentity
+                      ? 'TURN ON MESH'
                     : publicMeshBlockedByWormhole
                       ? 'TURN OFF WORMHOLE FOR MESH'
                       : 'GET MESH KEY'}
                   <div className="mt-1 text-[13px] text-green-200/70 normal-case tracking-normal leading-[1.45]">
                     {hasPublicLaneIdentity
                       ? 'Your public mesh key is already live for posting.'
+                      : hasStoredPublicLaneIdentity
+                        ? 'Use your saved public mesh key. This turns Wormhole off first if it is active.'
                       : publicMeshBlockedByWormhole
                         ? 'One tap turns Wormhole off and mints a separate public mesh key.'
                         : 'One tap for a working mesh key and address.'}

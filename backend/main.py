@@ -2175,19 +2175,26 @@ async def lifespan(app: FastAPI):
     # Only the primary backend supervises Wormhole. The Wormhole process itself
     # runs this same app in MESH_ONLY mode and must not recurse into spawning.
     if not _MESH_ONLY:
-        try:
-            from services.wormhole_supervisor import get_wormhole_state, sync_wormhole_with_settings
+        def _startup_wormhole_runtime():
+            try:
+                from services.wormhole_supervisor import get_wormhole_state, sync_wormhole_with_settings
 
-            sync_wormhole_with_settings()
-            _resume_private_delivery_background_work(
-                current_tier=_current_private_lane_tier(get_wormhole_state()),
-                reason="startup_resume",
-            )
-            _refresh_lookup_handle_rotation_background(reason="startup_resume")
-            privacy_prewarm_service.ensure_started()
-            privacy_prewarm_service.run_scheduled_once(reason="startup_resume")
-        except Exception as e:
-            logger.warning(f"Wormhole supervisor failed to sync: {e}")
+                sync_wormhole_with_settings()
+                _resume_private_delivery_background_work(
+                    current_tier=_current_private_lane_tier(get_wormhole_state()),
+                    reason="startup_resume",
+                )
+                _refresh_lookup_handle_rotation_background(reason="startup_resume")
+                privacy_prewarm_service.ensure_started()
+                privacy_prewarm_service.run_scheduled_once(reason="startup_resume")
+            except Exception as e:
+                logger.warning(f"Wormhole supervisor failed to sync: {e}")
+
+        threading.Thread(
+            target=_startup_wormhole_runtime,
+            daemon=True,
+            name="wormhole-startup-sync",
+        ).start()
         try:
             from services.mesh.mesh_hashchain import register_public_event_append_hook
 
@@ -7660,6 +7667,13 @@ _CCTV_PROXY_ALLOWED_HOSTS = {
     "infocar.dgt.es",  # Spain DGT
     "informo.madrid.es",  # Madrid
     "www.windy.com",
+    "imgproxy.windy.com",  # Windy preview image CDN
+    "www.lakecountypassage.com",  # Illinois Lake County PASSAGE snapshots
+    "webcam.forkswa.com",  # WSDOT partner public camera
+    "webcam.sunmountainlodge.com",  # WSDOT partner public camera
+    "www.nps.gov",  # WSDOT-linked Mount Rainier camera
+    "home.lewiscounty.com",  # WSDOT partner public camera
+    "www.seattle.gov",  # Seattle traffic camera media linked from WSDOT
 }
 
 
@@ -7785,6 +7799,16 @@ def _cctv_proxy_profile_for_url(target_url: str) -> _CCTVProxyProfile:
             cache_seconds=30,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"},
         )
+    if host == "www.lakecountypassage.com":
+        return _CCTVProxyProfile(
+            name="lake-county-passage",
+            timeout=(5.0, 12.0),
+            cache_seconds=30,
+            headers={
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Referer": "https://www.lakecountypassage.com/",
+            },
+        )
     if host in {"mdotjboss.state.mi.us", "micamerasimages.net"}:
         return _CCTVProxyProfile(
             name="michigan-dot",
@@ -7847,11 +7871,27 @@ def _cctv_proxy_profile_for_url(target_url: str) -> _CCTVProxyProfile:
                 "Referer": "https://informo.madrid.es/",
             },
         )
-    if host == "www.windy.com":
+    if host in {"www.windy.com", "imgproxy.windy.com"}:
         return _CCTVProxyProfile(
             name="windy-webcams",
             timeout=(5.0, 12.0),
             cache_seconds=60,
+            headers={
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Referer": "https://www.windy.com/",
+            },
+        )
+    if host in {
+        "webcam.forkswa.com",
+        "webcam.sunmountainlodge.com",
+        "www.nps.gov",
+        "home.lewiscounty.com",
+        "www.seattle.gov",
+    }:
+        return _CCTVProxyProfile(
+            name="wsdot-partner",
+            timeout=(5.0, 12.0),
+            cache_seconds=30,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"},
         )
     return _CCTVProxyProfile(
@@ -7895,6 +7935,30 @@ def _cctv_response_headers(resp, cache_seconds: int, include_length: bool = True
     return headers
 
 
+def _infer_cctv_media_type_from_url(target_url: str, content_type: str) -> str:
+    from urllib.parse import urlparse
+
+    normalized_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    if normalized_type and normalized_type not in {"application/octet-stream", "binary/octet-stream"}:
+        return content_type
+    path = str(urlparse(target_url).path or "").lower()
+    if path.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if path.endswith(".png"):
+        return "image/png"
+    if path.endswith(".gif"):
+        return "image/gif"
+    if path.endswith(".webp"):
+        return "image/webp"
+    if path.endswith(".mp4"):
+        return "video/mp4"
+    if path.endswith(".webm"):
+        return "video/webm"
+    if path.endswith(".m3u8"):
+        return "application/vnd.apple.mpegurl"
+    return content_type or "application/octet-stream"
+
+
 def _fetch_cctv_upstream_response(request: Request, target_url: str, profile: _CCTVProxyProfile):
     import requests as _req
 
@@ -7928,7 +7992,10 @@ def _proxy_cctv_media_response(request: Request, target_url: str):
     profile = _cctv_proxy_profile_for_url(target_url)
     resp = _fetch_cctv_upstream_response(request, target_url, profile)
 
-    content_type = resp.headers.get("Content-Type", "application/octet-stream")
+    content_type = _infer_cctv_media_type_from_url(
+        target_url,
+        resp.headers.get("Content-Type", "application/octet-stream"),
+    )
     is_hls_playlist = (
         ".m3u8" in str(parsed.path or "").lower()
         or "mpegurl" in content_type.lower()

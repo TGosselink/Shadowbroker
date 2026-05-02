@@ -5962,6 +5962,7 @@ const MaplibreViewer = ({
             return (
               <CctvFullscreenModal
                 url={url}
+                rawUrl={rawUrl}
                 mediaType={mt}
                 isVideo={isVideo}
                 cameraName={cameraName}

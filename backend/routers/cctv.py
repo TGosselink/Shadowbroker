@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_CCTV_PROXY_CONNECT_TIMEOUT_S = 2.0
+
 _CCTV_PROXY_ALLOWED_HOSTS = {
     "s3-eu-west-1.amazonaws.com",
     "jamcams.tfl.gov.uk",
@@ -46,13 +48,20 @@ _CCTV_PROXY_ALLOWED_HOSTS = {
     "infocar.dgt.es",
     "informo.madrid.es",
     "www.windy.com",
+    "imgproxy.windy.com",
+    "www.lakecountypassage.com",
+    "webcam.forkswa.com",
+    "webcam.sunmountainlodge.com",
+    "www.nps.gov",
+    "home.lewiscounty.com",
+    "www.seattle.gov",
 }
 
 
 @dataclass(frozen=True)
 class _CCTVProxyProfile:
     name: str
-    timeout: tuple = (5.0, 10.0)
+    timeout: tuple = (_CCTV_PROXY_CONNECT_TIMEOUT_S, 8.0)
     cache_seconds: int = 30
     headers: dict = field(default_factory=dict)
 
@@ -80,69 +89,78 @@ def _cctv_proxy_profile_for_url(target_url: str) -> _CCTVProxyProfile:
     path = str(parsed.path or "").strip().lower()
 
     if host in {"jamcams.tfl.gov.uk", "s3-eu-west-1.amazonaws.com"}:
-        return _CCTVProxyProfile(name="tfl-jamcam", timeout=(5.0, 20.0), cache_seconds=15,
+        return _CCTVProxyProfile(name="tfl-jamcam", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 20.0), cache_seconds=15,
             headers={"Accept": "video/mp4,image/avif,image/webp,image/apng,image/*,*/*;q=0.8", "Referer": "https://tfl.gov.uk/"})
     if host == "images.data.gov.sg":
-        return _CCTVProxyProfile(name="lta-singapore", timeout=(5.0, 10.0), cache_seconds=30,
+        return _CCTVProxyProfile(name="lta-singapore", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 10.0), cache_seconds=30,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"})
     if host == "cctv.austinmobility.io":
-        return _CCTVProxyProfile(name="austin-mobility", timeout=(5.0, 8.0), cache_seconds=15,
+        return _CCTVProxyProfile(name="austin-mobility", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 8.0), cache_seconds=15,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                      "Referer": "https://data.mobility.austin.gov/", "Origin": "https://data.mobility.austin.gov"})
     if host == "webcams.nyctmc.org":
-        return _CCTVProxyProfile(name="nyc-dot", timeout=(5.0, 10.0), cache_seconds=15,
+        return _CCTVProxyProfile(name="nyc-dot", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 10.0), cache_seconds=15,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"})
     if host in {"cwwp2.dot.ca.gov", "wzmedia.dot.ca.gov"}:
-        return _CCTVProxyProfile(name="caltrans", timeout=(5.0, 15.0), cache_seconds=15,
+        return _CCTVProxyProfile(name="caltrans", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 15.0), cache_seconds=15,
             headers={"Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,video/*,image/*,*/*;q=0.8",
                      "Referer": "https://cwwp2.dot.ca.gov/"})
     if host in {"images.wsdot.wa.gov", "olypen.com", "flyykm.com", "cam.pangbornairport.com"}:
-        return _CCTVProxyProfile(name="wsdot", timeout=(5.0, 12.0), cache_seconds=30,
+        return _CCTVProxyProfile(name="wsdot", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 12.0), cache_seconds=30,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"})
+    if host in {"www.lakecountypassage.com", "webcam.forkswa.com", "webcam.sunmountainlodge.com", "home.lewiscounty.com", "www.seattle.gov"}:
+        return _CCTVProxyProfile(name="regional-cctv-image", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 10.0), cache_seconds=45,
+            headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                     "Referer": f"https://{host}/"})
+    if host == "www.nps.gov":
+        return _CCTVProxyProfile(name="nps-webcam", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 10.0), cache_seconds=60,
+            headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                     "Referer": "https://www.nps.gov/"})
     if host in {"navigator-c2c.dot.ga.gov", "navigator-c2c.ga.gov", "navigator-csc.dot.ga.gov"}:
         read_timeout = 18.0 if "/snapshots/" in path else 12.0
-        return _CCTVProxyProfile(name="gdot-snapshot", timeout=(5.0, read_timeout), cache_seconds=15,
+        return _CCTVProxyProfile(name="gdot-snapshot", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, read_timeout), cache_seconds=15,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                      "Referer": "http://navigator-c2c.dot.ga.gov/"})
     if host == "511ga.org":
-        return _CCTVProxyProfile(name="gdot-511ga-image", timeout=(5.0, 12.0), cache_seconds=15,
+        return _CCTVProxyProfile(name="gdot-511ga-image", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 12.0), cache_seconds=15,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                      "Referer": "https://511ga.org/cctv"})
     if host.startswith("vss") and host.endswith("dot.ga.gov"):
-        return _CCTVProxyProfile(name="gdot-hls", timeout=(5.0, 20.0), cache_seconds=10,
+        return _CCTVProxyProfile(name="gdot-hls", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 20.0), cache_seconds=10,
             headers={"Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,video/*,*/*;q=0.8",
                      "Referer": "http://navigator-c2c.dot.ga.gov/"})
     if host in {"gettingaroundillinois.com", "cctv.travelmidwest.com"}:
-        return _CCTVProxyProfile(name="illinois-dot", timeout=(5.0, 12.0), cache_seconds=30,
+        return _CCTVProxyProfile(name="illinois-dot", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 12.0), cache_seconds=30,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"})
     if host in {"mdotjboss.state.mi.us", "micamerasimages.net"}:
-        return _CCTVProxyProfile(name="michigan-dot", timeout=(5.0, 12.0), cache_seconds=30,
+        return _CCTVProxyProfile(name="michigan-dot", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 12.0), cache_seconds=30,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                      "Referer": "https://mdotjboss.state.mi.us/"})
     if host in {"publicstreamer1.cotrip.org", "publicstreamer2.cotrip.org",
                 "publicstreamer3.cotrip.org", "publicstreamer4.cotrip.org"}:
-        return _CCTVProxyProfile(name="cotrip-hls", timeout=(5.0, 20.0), cache_seconds=10,
+        return _CCTVProxyProfile(name="cotrip-hls", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 20.0), cache_seconds=10,
             headers={"Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,video/*,*/*;q=0.8",
                      "Referer": "https://www.cotrip.org/"})
     if host == "cocam.carsprogram.org":
-        return _CCTVProxyProfile(name="cotrip-preview", timeout=(5.0, 12.0), cache_seconds=20,
+        return _CCTVProxyProfile(name="cotrip-preview", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 12.0), cache_seconds=20,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                      "Referer": "https://www.cotrip.org/"})
     if host in {"tripcheck.com", "www.tripcheck.com"}:
-        return _CCTVProxyProfile(name="odot-tripcheck", timeout=(5.0, 12.0), cache_seconds=30,
+        return _CCTVProxyProfile(name="odot-tripcheck", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 12.0), cache_seconds=30,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"})
     if host == "infocar.dgt.es":
-        return _CCTVProxyProfile(name="dgt-spain", timeout=(5.0, 8.0), cache_seconds=60,
+        return _CCTVProxyProfile(name="dgt-spain", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 8.0), cache_seconds=60,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                      "Referer": "https://infocar.dgt.es/"})
     if host == "informo.madrid.es":
-        return _CCTVProxyProfile(name="madrid-city", timeout=(5.0, 12.0), cache_seconds=30,
+        return _CCTVProxyProfile(name="madrid-city", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 12.0), cache_seconds=30,
             headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                      "Referer": "https://informo.madrid.es/"})
-    if host == "www.windy.com":
-        return _CCTVProxyProfile(name="windy-webcams", timeout=(5.0, 12.0), cache_seconds=60,
-            headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"})
-    return _CCTVProxyProfile(name="generic-cctv", timeout=(5.0, 10.0), cache_seconds=30,
+    if host in {"www.windy.com", "imgproxy.windy.com"}:
+        return _CCTVProxyProfile(name="windy-webcams", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 12.0), cache_seconds=60,
+            headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                     "Referer": "https://www.windy.com/"})
+    return _CCTVProxyProfile(name="generic-cctv", timeout=(_CCTV_PROXY_CONNECT_TIMEOUT_S, 8.0), cache_seconds=30,
         headers={"Accept": "*/*"})
 
 
@@ -221,13 +239,40 @@ def _rewrite_cctv_hls_playlist(base_url: str, body: str) -> str:
     return "\n".join(rewritten_lines) + ("\n" if body.endswith("\n") else "")
 
 
+def _infer_cctv_media_type_from_url(target_url: str, content_type: str) -> str:
+    from urllib.parse import urlparse
+
+    clean_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    if clean_type and clean_type not in {"application/octet-stream", "binary/octet-stream"}:
+        return content_type
+    path = str(urlparse(target_url).path or "").lower()
+    if path.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if path.endswith(".png"):
+        return "image/png"
+    if path.endswith(".webp"):
+        return "image/webp"
+    if path.endswith(".gif"):
+        return "image/gif"
+    if path.endswith(".mp4"):
+        return "video/mp4"
+    if path.endswith((".m3u8", ".m3u")):
+        return "application/vnd.apple.mpegurl"
+    if path.endswith((".mjpg", ".mjpeg")):
+        return "multipart/x-mixed-replace"
+    return content_type or "application/octet-stream"
+
+
 def _proxy_cctv_media_response(request: Request, target_url: str):
     from urllib.parse import urlparse
     from fastapi.responses import Response
     parsed = urlparse(target_url)
     profile = _cctv_proxy_profile_for_url(target_url)
     resp = _fetch_cctv_upstream_response(request, target_url, profile)
-    content_type = resp.headers.get("Content-Type", "application/octet-stream")
+    content_type = _infer_cctv_media_type_from_url(
+        target_url,
+        resp.headers.get("Content-Type", "application/octet-stream"),
+    )
     is_hls_playlist = (
         ".m3u8" in str(parsed.path or "").lower()
         or "mpegurl" in content_type.lower()

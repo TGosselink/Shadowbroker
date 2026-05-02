@@ -19,6 +19,7 @@ import concurrent.futures
 import json
 import math
 import os
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -134,6 +135,10 @@ _INTEL_STARTUP_CACHE_KEYS = (
     "correlations",
     "fimi",
 )
+_STARTUP_PRIORITY_TIMEOUT_S = float(os.environ.get("SHADOWBROKER_STARTUP_PRIORITY_TIMEOUT_S", "18"))
+_STARTUP_HEAVY_REFRESH_DELAY_S = float(os.environ.get("SHADOWBROKER_STARTUP_HEAVY_REFRESH_DELAY_S", "90"))
+_STARTUP_HEAVY_REFRESH_STARTED = False
+_STARTUP_HEAVY_REFRESH_LOCK = threading.Lock()
 
 # Shared thread pool — reused across all fetch cycles instead of creating/destroying per tick
 _SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
@@ -399,6 +404,72 @@ def update_slow_data():
     logger.info("Slow-tier update complete.")
 
 
+def _record_fetch_success(label: str, name: str, start: float) -> None:
+    duration = time.perf_counter() - start
+    from services.fetch_health import record_success
+
+    record_success(name, duration_s=duration)
+    if duration > _SLOW_FETCH_S:
+        logger.warning(f"{label} task slow: {name} took {duration:.2f}s")
+
+
+def _record_fetch_failure(label: str, name: str, start: float, error: Exception) -> None:
+    duration = time.perf_counter() - start
+    from services.fetch_health import record_failure
+
+    record_failure(name, error=error, duration_s=duration)
+    logger.exception(f"{label} task failed: {name}")
+
+
+def _load_cctv_cache_for_startup() -> None:
+    """Load cached CCTV rows without running remote ingestors during first paint."""
+    try:
+        fetch_cctv()
+    except Exception as e:
+        logger.warning("Startup CCTV cache load failed (non-fatal): %s", e)
+
+
+def _run_delayed_startup_heavy_refresh() -> None:
+    if _STARTUP_HEAVY_REFRESH_DELAY_S > 0:
+        logger.info(
+            "Startup heavy synthesis delayed %.0fs so the dashboard can finish first paint",
+            _STARTUP_HEAVY_REFRESH_DELAY_S,
+        )
+        time.sleep(_STARTUP_HEAVY_REFRESH_DELAY_S)
+    logger.info("Startup heavy synthesis beginning (slow feeds, enrichment, daily products)...")
+    _run_tasks(
+        "startup-heavy",
+        [
+            update_slow_data,
+            fetch_volcanoes,
+            fetch_viirs_change_nodes,
+            fetch_unusual_whales,
+            fetch_fimi,
+            fetch_uap_sightings,
+            fetch_wastewater,
+            fetch_sar_catalog,
+            fetch_sar_products,
+        ],
+    )
+    logger.info("Startup heavy synthesis complete.")
+
+
+def _schedule_delayed_startup_heavy_refresh() -> None:
+    global _STARTUP_HEAVY_REFRESH_STARTED
+    if _STARTUP_HEAVY_REFRESH_DELAY_S < 0:
+        logger.info("Startup heavy synthesis disabled by SHADOWBROKER_STARTUP_HEAVY_REFRESH_DELAY_S")
+        return
+    with _STARTUP_HEAVY_REFRESH_LOCK:
+        if _STARTUP_HEAVY_REFRESH_STARTED:
+            return
+        _STARTUP_HEAVY_REFRESH_STARTED = True
+    threading.Thread(
+        target=_run_delayed_startup_heavy_refresh,
+        name="startup-heavy-refresh",
+        daemon=True,
+    ).start()
+
+
 def update_all_data(*, startup_mode: bool = False):
     """Full refresh.
 
@@ -410,6 +481,48 @@ def update_all_data(*, startup_mode: bool = False):
     seed_startup_caches()
     with _data_lock:
         meshtastic_seeded = bool(latest_data.get("meshtastic_map_nodes"))
+    if startup_mode:
+        _load_cctv_cache_for_startup()
+        priority_funcs = [
+            fetch_airports,
+            update_fast_data,
+            fetch_gdelt,
+            fetch_crowdthreat,
+            fetch_firms_fires,
+            fetch_weather_alerts,
+        ]
+        if not meshtastic_seeded:
+            priority_funcs.append(fetch_meshtastic_nodes)
+        else:
+            logger.info(
+                "Startup preload: Meshtastic cache already loaded, deferring remote map refresh to scheduled cadence"
+            )
+        logger.info("Startup priority preload starting (%d tasks)...", len(priority_funcs))
+        cycle_start = time.perf_counter()
+        futures = {
+            _SHARED_EXECUTOR.submit(func): (func.__name__, time.perf_counter())
+            for func in priority_funcs
+        }
+        for future, (name, start) in futures.items():
+            remaining = _STARTUP_PRIORITY_TIMEOUT_S - (time.perf_counter() - cycle_start)
+            if remaining <= 0:
+                logger.info("Startup priority budget reached; %s will continue in background", name)
+                continue
+            try:
+                future.result(timeout=remaining)
+                _record_fetch_success("startup-priority", name, start)
+            except concurrent.futures.TimeoutError:
+                logger.info(
+                    "Startup priority task still warming after %.1fs: %s",
+                    time.perf_counter() - start,
+                    name,
+                )
+            except Exception as e:
+                _record_fetch_failure("startup-priority", name, start, e)
+        logger.info("Startup preload: deferring Playwright Liveuamap scraper to scheduled cadence")
+        _schedule_delayed_startup_heavy_refresh()
+        logger.info("Startup priority preload complete; slow synthesis is warming in background.")
+        return
     futures = {
         _SHARED_EXECUTOR.submit(fetch_airports): ("fetch_airports", time.perf_counter()),
         _SHARED_EXECUTOR.submit(update_fast_data): ("update_fast_data", time.perf_counter()),
@@ -496,7 +609,7 @@ def update_all_data(*, startup_mode: bool = False):
 
 
 _scheduler = None
-_STARTUP_CCTV_INGEST_DELAY_S = 30
+_STARTUP_CCTV_INGEST_DELAY_S = int(os.environ.get("SHADOWBROKER_STARTUP_CCTV_INGEST_DELAY_S", "180"))
 _FINANCIAL_REFRESH_MINUTES = 30
 
 

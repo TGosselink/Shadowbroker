@@ -21,14 +21,21 @@ const stagedReleaseAttestationPath = path.join(
 const excludedNames = new Set([
   '.env',
   '.pytest_cache',
+  '.ruff_cache',
   '__pycache__',
   'backend.egg-info',
   'build',
   'data',
   'tests',
+  'timemachine',
 ]);
 
 const excludedFiles = new Set([
+  '.env.example',
+  'ais_cache.json',
+  'carrier_cache.json',
+  'cctv.db',
+  'dm_token_pepper.key',
   'pytest.ini',
 ]);
 

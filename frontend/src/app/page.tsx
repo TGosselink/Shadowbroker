@@ -26,6 +26,7 @@ import GlobalTicker from '@/components/GlobalTicker';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import OnboardingModal, { useOnboarding } from '@/components/OnboardingModal';
 import ChangelogModal, { useChangelog } from '@/components/ChangelogModal';
+import StartupWarmupModal, { useStartupWarmupNotice } from '@/components/StartupWarmupModal';
 import type { ActiveLayers, KiwiSDR, Scanner, SelectedEntity } from '@/types/dashboard';
 import type { ShodanSearchMatch } from '@/types/shodan';
 import { API_BASE } from '@/lib/api';
@@ -452,6 +453,7 @@ export default function Dashboard() {
 
   // Onboarding & connection status
   const { showOnboarding, setShowOnboarding } = useOnboarding();
+  const { showWarmupNotice, setShowWarmupNotice } = useStartupWarmupNotice();
   const { showChangelog, setShowChangelog } = useChangelog();
 
   return (
@@ -930,8 +932,13 @@ export default function Dashboard() {
           />
         )}
 
+        {/* FIRST-RUN WARMUP NOTICE — shows once after onboarding */}
+        {!showOnboarding && showWarmupNotice && (
+          <StartupWarmupModal onClose={() => setShowWarmupNotice(false)} />
+        )}
+
         {/* v0.4 CHANGELOG MODAL — shows once per version after onboarding */}
-        {!showOnboarding && showChangelog && (
+        {!showOnboarding && !showWarmupNotice && showChangelog && (
           <ChangelogModal onClose={() => setShowChangelog(false)} />
         )}
 

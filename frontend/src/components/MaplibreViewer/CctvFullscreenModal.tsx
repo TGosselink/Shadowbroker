@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { AlertTriangle, Play, Pause } from 'lucide-react';
 import HlsVideo, { type HlsVideoHandle } from '@/components/HlsVideo';
 
 export interface CctvFullscreenModalProps {
   url: string;
+  rawUrl?: string;
   mediaType: string;
   isVideo: boolean;
   cameraName: string;
@@ -16,6 +17,7 @@ export interface CctvFullscreenModalProps {
 
 export function CctvFullscreenModal({
   url,
+  rawUrl = '',
   mediaType,
   isVideo,
   cameraName,
@@ -25,8 +27,60 @@ export function CctvFullscreenModal({
 }: CctvFullscreenModalProps) {
   const [paused, setPaused] = useState(false);
   const [mediaError, setMediaError] = useState(false);
+  const [mediaLoaded, setMediaLoaded] = useState(false);
+  const [sourceIndex, setSourceIndex] = useState(0);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<HlsVideoHandle>(null);
+  const sources = useMemo(() => {
+    const seen = new Set<string>();
+    return [url, rawUrl]
+      .map((candidate) => String(candidate || '').trim())
+      .filter((candidate) => {
+        if (!candidate || seen.has(candidate)) return false;
+        seen.add(candidate);
+        return true;
+      });
+  }, [rawUrl, url]);
+  const activeUrl = sources[sourceIndex] || '';
+
+  useEffect(() => {
+    setSourceIndex(0);
+    setMediaError(false);
+    setMediaLoaded(false);
+    setPaused(false);
+  }, [rawUrl, url]);
+
+  useEffect(() => {
+    setMediaLoaded(false);
+  }, [activeUrl]);
+
+  const handleMediaFailure = useCallback(() => {
+    setSourceIndex((idx) => {
+      const next = idx + 1;
+      if (next < sources.length) {
+        setMediaError(false);
+        return next;
+      }
+      setMediaError(true);
+      return idx;
+    });
+  }, [sources.length]);
+
+  const handleMediaReady = useCallback(() => {
+    setMediaLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (sourceIndex !== 0 || sources.length < 2 || mediaLoaded || mediaError) return;
+    const timeoutMs = mediaType === 'hls' ? 3200 : 1800;
+    const timer = window.setTimeout(() => {
+      setSourceIndex((idx) => {
+        if (idx !== 0 || mediaLoaded) return idx;
+        return 1;
+      });
+    }, timeoutMs);
+    return () => window.clearTimeout(timer);
+  }, [mediaError, mediaLoaded, mediaType, sourceIndex, sources.length]);
 
   const togglePlay = useCallback(() => {
     if (mediaType === 'hls') {
@@ -176,17 +230,21 @@ export function CctvFullscreenModal({
             overflow: 'hidden',
           }}
         >
-          {url ? (
+          {activeUrl ? (
             <>
               {mediaType === 'video' && !mediaError && (
                 <video
+                  key={activeUrl}
                   ref={videoRef}
-                  src={url}
+                  src={activeUrl}
                   autoPlay
                   loop
                   muted
                   playsInline
-                  onError={() => setMediaError(true)}
+                  onError={handleMediaFailure}
+                  onCanPlay={handleMediaReady}
+                  onLoadedData={handleMediaReady}
+                  onPlaying={handleMediaReady}
                   style={{
                     maxWidth: '100%',
                     maxHeight: 'calc(100vh - 260px)',
@@ -197,15 +255,18 @@ export function CctvFullscreenModal({
               )}
               {mediaType === 'hls' && !mediaError && (
                 <HlsVideo
+                  key={activeUrl}
                   ref={hlsRef}
-                  url={url}
-                  onError={() => setMediaError(true)}
-                  className=""
+                  url={activeUrl}
+                  onError={handleMediaFailure}
+                  onLoaded={handleMediaReady}
+                  className="max-w-full max-h-[calc(100vh-260px)] object-contain"
                 />
               )}
               {mediaType === 'mjpeg' && (
                 <img
-                  src={url}
+                  key={activeUrl}
+                  src={activeUrl}
                   alt="MJPEG Feed"
                   style={{
                     maxWidth: '100%',
@@ -213,14 +274,14 @@ export function CctvFullscreenModal({
                     objectFit: 'contain',
                     filter: 'contrast(1.25) saturate(0.5)',
                   }}
-                  onError={(e) => {
-                    (e.target as HTMLImageElement).style.display = 'none';
-                  }}
+                  onError={handleMediaFailure}
+                  onLoad={handleMediaReady}
                 />
               )}
               {(mediaType === 'image' || mediaType === 'satellite') && (
                 <img
-                  src={url}
+                  key={activeUrl}
+                  src={activeUrl}
                   alt="CCTV Feed"
                   style={{
                     maxWidth: '100%',
@@ -228,10 +289,8 @@ export function CctvFullscreenModal({
                     objectFit: 'contain',
                     filter: 'contrast(1.25) saturate(0.5)',
                   }}
-                  onError={(e) => {
-                    const target = e.target as HTMLImageElement;
-                    target.style.display = 'none';
-                  }}
+                  onError={handleMediaFailure}
+                  onLoad={handleMediaReady}
                 />
               )}
 
@@ -239,7 +298,7 @@ export function CctvFullscreenModal({
               {mediaError && (
                 <div style={{ fontSize: 11, color: 'rgba(239,68,68,0.7)', fontFamily: 'monospace', letterSpacing: '0.15em', textAlign: 'center', padding: 40 }}>
                   FEED UNAVAILABLE<br />
-                  <span style={{ fontSize: 9, color: 'rgba(148,163,184,0.5)' }}>stream failed to load — source may be offline</span>
+                  <span style={{ fontSize: 9, color: 'rgba(148,163,184,0.5)' }}>proxy and direct source both failed</span>
                 </div>
               )}
 
@@ -329,10 +388,10 @@ export function CctvFullscreenModal({
             {cameraName}
           </span>
           <div style={{ display: 'flex', gap: 10 }}>
-            {url && (
+            {activeUrl && (
               <>
                 <a
-                  href={url}
+                  href={rawUrl || activeUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{
@@ -354,7 +413,7 @@ export function CctvFullscreenModal({
                 <button
                   onClick={async () => {
                     try {
-                      await navigator.clipboard.writeText(url);
+                      await navigator.clipboard.writeText(rawUrl || activeUrl);
                     } catch { /* ignore */ }
                   }}
                   style={{
