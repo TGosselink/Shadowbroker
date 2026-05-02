@@ -38,10 +38,9 @@ ShadowBroker includes an optional Shodan connector for operator-supplied API acc
 
 ## Interesting Use Cases
 
-* **Communicate on the InfoNet testnet** — The first decentralized intelligence mesh built into an OSINT tool. Obfuscated messaging with gate personas, Dead Drop peer-to-peer exchange, and a built-in terminal CLI. No accounts, no signup. Privacy is not guaranteed yet — this is an experimental testnet — but the protocol is live and being hardened.
 * **Track Air Force One**, the private jets of billionaires and dictators, and every military tanker, ISR, and fighter broadcasting ADS-B — with automatic holding pattern detection when aircraft start circling
-* **Estimate where US aircraft carriers are** using automated GDELT news scraping — no other open tool does this
-* **Search internet-connected devices worldwide** via Shodan — cameras, SCADA systems, databases — plotted as a live overlay on the map
+* * **Connect an AI agent as a co-analyst** through ShadowBroker's HMAC-signed agentic command channel — supports OpenClaw and any other agent that speaks the protocol (Claude, GPT, LangChain, custom). The agent gets full read/write access to all 35+ data layers, pin placement, map control, SAR ground-change, mesh networking, and alert delivery. It sees everything the operator sees and can take actions on the map in real time.
+* * **Communicate on the InfoNet testnet** — The first decentralized intelligence mesh built into an OSINT tool. Obfuscated messaging with gate personas, Dead Drop peer-to-peer exchange, and a built-in terminal CLI. No accounts, no signup. Privacy is not guaranteed yet — this is an experimental testnet — but the protocol is live and being hardened.
 * **Right-click anywhere on Earth** for a country dossier (head of state, population, languages), Wikipedia summary, and the latest Sentinel-2 satellite photo at 10m resolution
 * **Click a KiwiSDR node** and tune into live shortwave radio directly in the dashboard. Click a police scanner feed and eavesdrop in one click.
 * **Watch 11,000+ CCTV cameras** across 6 countries — London, NYC, California, Spain, Singapore, and more — streaming live on the map
@@ -51,10 +50,12 @@ ShadowBroker includes an optional Shodan connector for operator-supplied API acc
 * **Follow earthquakes, volcanic eruptions, active wildfires** (NASA FIRMS), severe weather alerts, and air quality readings worldwide
 * **Map military bases, 35,000+ power plants**, 2,000+ data centers, and internet outage regions — cross-referenced automatically
 * **Connect to Meshtastic mesh radio nodes** and APRS amateur radio networks — visible on the map and integrated into Mesh Chat
-* **Connect an AI agent as a co-analyst** through ShadowBroker's HMAC-signed agentic command channel — supports OpenClaw and any other agent that speaks the protocol (Claude, GPT, LangChain, custom). The agent gets full read/write access to all 35+ data layers, pin placement, map control, SAR ground-change, mesh networking, and alert delivery. It sees everything the operator sees and can take actions on the map in real time.
 * **Detect ground changes through cloud cover** with SAR (Synthetic Aperture Radar) — mm-scale ground deformation, flood extent, vegetation disturbance, and damage assessments from NASA OPERA and Copernicus EGMS. Define your own watch areas and get anomaly alerts. Free with a NASA Earthdata account.
 * **Switch visual modes** — DEFAULT, SATELLITE, FLIR (thermal), NVG (night vision), CRT (retro terminal) — via the STYLE button
 * **Track trains** across the US (Amtrak) and Europe (DigiTraffic) in real time
+* **Estimate where US aircraft carriers are** using automated GDELT news scraping — no other open tool does this
+* **Search internet-connected devices worldwide** via Shodan — cameras, SCADA systems, databases — plotted as a live overlay on the map
+
 
 ---
 
