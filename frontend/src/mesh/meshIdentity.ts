@@ -414,8 +414,17 @@ function utf8ToBuf(value: string): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(value);
 }
 
+function toCryptoBytes(value: ArrayBuffer | ArrayBufferView): Uint8Array<ArrayBuffer> {
+  const source = ArrayBuffer.isView(value)
+    ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+    : new Uint8Array(value);
+  const copy = new Uint8Array(source.byteLength);
+  copy.set(source);
+  return copy;
+}
+
 async function deriveNodeIdForLength(publicKeyRaw: ArrayBuffer, length: number): Promise<string> {
-  const hash = await crypto.subtle.digest('SHA-256', publicKeyRaw);
+  const hash = await crypto.subtle.digest('SHA-256', toCryptoBytes(publicKeyRaw));
   return NODE_ID_PREFIX + bufToHex(hash).slice(0, length);
 }
 
@@ -601,7 +610,7 @@ async function deriveIdentityBoundWrapKey(info: string): Promise<CryptoKey> {
     throw new Error('No DH key available for contact encryption');
   }
 
-  const dhPubRaw = base64ToBuf(dhPubKey);
+  const dhPubRaw = toCryptoBytes(base64ToBuf(dhPubKey));
   let selfPubKey: CryptoKey;
   let sharedSecret: ArrayBuffer;
   if (dhAlgo === 'X25519') {
@@ -626,7 +635,9 @@ async function deriveIdentityBoundWrapKey(info: string): Promise<CryptoKey> {
     );
   }
 
-  const hkdfKey = await crypto.subtle.importKey('raw', sharedSecret, 'HKDF', false, ['deriveKey']);
+  const hkdfKey = await crypto.subtle.importKey('raw', toCryptoBytes(sharedSecret), 'HKDF', false, [
+    'deriveKey',
+  ]);
   return crypto.subtle.deriveKey(
     {
       name: 'HKDF',
