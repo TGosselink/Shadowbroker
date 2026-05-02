@@ -362,6 +362,12 @@ export default function Dashboard() {
     [effects, activeStyle],
   );
 
+  const [flyToLocation, setFlyToLocation] = useState<{
+    lat: number;
+    lng: number;
+    ts: number;
+  } | null>(null);
+
   const handleFlyTo = useCallback(
     (lat: number, lng: number) => setFlyToLocation({ lat, lng, ts: Date.now() }),
     [],
@@ -387,12 +393,6 @@ export default function Dashboard() {
   };
 
   const [activeFilters, setActiveFilters] = useState<Record<string, string[]>>({});
-  const [flyToLocation, setFlyToLocation] = useState<{
-    lat: number;
-    lng: number;
-    ts: number;
-  } | null>(null);
-
   // Agent fly_to handler (sar_focus_aoi etc.) — wired here now that
   // setFlyToLocation is in scope.  show_image is routed through
   // useAgentActions at the top of Dashboard.

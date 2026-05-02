@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from auth import require_local_operator, require_openclaw_or_local
 from limiter import limiter
+from services.fetchers._store import latest_data as _latest_data
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

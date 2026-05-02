@@ -23,7 +23,7 @@ import hmac
 import secrets
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from collections import deque
 from urllib.parse import urlparse
 from services.mesh.mesh_crypto import _derive_peer_key, normalize_peer_url

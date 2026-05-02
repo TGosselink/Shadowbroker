@@ -143,8 +143,7 @@ export function MilitaryBasePopup({ base, oracleIntel, onClose }: MilitaryBasePo
               </span>
               {oracleIntel.market && (
                 <span className="text-purple-400">
-                  {' '}
-                  // {oracleIntel.market.consensus_pct}%
+                  {` // ${oracleIntel.market.consensus_pct}%`}
                 </span>
               )}
             </div>

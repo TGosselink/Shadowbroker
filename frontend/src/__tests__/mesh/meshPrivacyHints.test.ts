@@ -483,16 +483,16 @@ describe('meshPrivacyHints', () => {
     expect(hint).toEqual(
       expect.objectContaining({
         severity: 'warn',
-        title: 'TRANSITIONAL PRIVATE LANE',
+        title: 'CONTROL-ONLY PRIVATE LANE',
       }),
     );
-    // Must explicitly mention gate is on a transitional lane
-    expect(hint?.detail).toContain('transitional');
+    // Must explicitly mention gate is on a control-only private lane
+    expect(hint?.detail).toContain('PRIVATE / CONTROL_ONLY');
     // Must explicitly mention DM requires a stronger tier
     expect(hint?.detail).toContain('Dead Drop');
-    expect(hint?.detail).toMatch(/PRIVATE \/ STRONG/i);
+    expect(hint?.detail).toContain('stronger lane');
     // Must not imply gate and DM share the same posture
-    expect(hint?.detail).toContain('weaker than DM');
+    expect(hint?.detail).toContain('metadata resistance is reduced');
   });
 
   it('relay delivery hint is specific to Dead Drop, not gate', () => {

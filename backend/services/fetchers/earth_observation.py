@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from services.network_utils import fetch_with_curl
 from services.fetchers._store import latest_data, _data_lock, _mark_fresh
+from services.fetchers.nuforc_enrichment import enrich_sighting
 from services.fetchers.retry import with_retry
 
 logger = logging.getLogger(__name__)

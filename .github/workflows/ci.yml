@@ -48,5 +48,13 @@ jobs:
       - run: cd backend && uv run ruff check .
       - run: cd backend && uv run black --check .
       - run: cd backend && uv run python -c "from services.fetchers.retry import with_retry; from services.env_check import validate_env; print('Module imports OK')"
-      - name: Run tests
-        run: cd backend && uv run pytest tests/ services/infonet/tests -v --tb=short
+      - name: Run release smoke tests
+        run: |
+          cd backend
+          uv run pytest \
+            tests/mesh/test_mesh_node_bootstrap_runtime.py \
+            tests/mesh/test_mesh_infonet_sync_support.py \
+            tests/mesh/test_mesh_canonical.py \
+            tests/mesh/test_mesh_merkle.py \
+            tests/test_release_helper.py \
+            -v --tb=short

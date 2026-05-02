@@ -1,4 +1,5 @@
 import asyncio
+import json as json_mod
 import logging
 import time
 from typing import Any
@@ -36,6 +37,7 @@ get_wormhole_state = _main_delegate("get_wormhole_state")
 _scoped_view_authenticated = _main_delegate("_scoped_view_authenticated")
 _privacy_core_status = _main_delegate("_privacy_core_status")
 _release_gate_status = _main_delegate("_release_gate_status")
+_resolve_dm_aliases = _main_delegate("_resolve_dm_aliases")
 get_transport_identity = _main_delegate("get_transport_identity")
 get_active_gate_identity = _main_delegate("get_active_gate_identity")
 list_gate_personas = _main_delegate("list_gate_personas")

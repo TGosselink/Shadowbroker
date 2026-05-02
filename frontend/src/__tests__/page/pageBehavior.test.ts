@@ -6,6 +6,8 @@
  *  2. Layer sync first-mount suppression — initial sync does NOT dispatch LAYER_TOGGLE_EVENT
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import { teardownWormholeOnClose } from '@/lib/wormholeTeardown';
 import { LAYER_TOGGLE_EVENT } from '@/hooks/useDataPolling';
 
@@ -123,8 +125,6 @@ describe('page.tsx behavior — layer sync first-mount suppression', () => {
   });
 
   it('page.tsx uses initialLayerSyncRef for first-mount suppression', () => {
-    const fs = require('fs');
-    const path = require('path');
     const page = fs.readFileSync(
       path.resolve(__dirname, '../../app/page.tsx'),
       'utf-8',
