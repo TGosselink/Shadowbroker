@@ -15,7 +15,7 @@ import time
 import heapq
 from datetime import datetime, timedelta
 from pathlib import Path
-from services.network_utils import fetch_with_curl
+from services.network_utils import external_curl_fallback_enabled, fetch_with_curl
 from services.fetchers._store import latest_data, _data_lock, _mark_fresh
 from services.fetchers.nuforc_enrichment import enrich_sighting
 from services.fetchers.retry import with_retry
@@ -685,6 +685,8 @@ _NUFORC_TOKEN = os.environ.get("NUFORC_MAPBOX_TOKEN", "").strip()
 _NUFORC_RADIUS_M = 200_000  # 200 km query radius
 _NUFORC_LIMIT = 50  # max features per tilequery call
 _NUFORC_RECENT_DAYS = int(os.environ.get("NUFORC_RECENT_DAYS", "60"))
+_NUFORC_HF_FALLBACK_LIMIT = max(25, int(os.environ.get("NUFORC_HF_FALLBACK_LIMIT", "250")))
+_NUFORC_HF_GEOCODE_LIMIT = max(25, int(os.environ.get("NUFORC_HF_GEOCODE_LIMIT", "150")))
 _NUFORC_GEOCODE_WORKERS = max(1, int(os.environ.get("NUFORC_GEOCODE_WORKERS", "1")))
 # Photon (Komoot) is more lenient than Nominatim — ~200ms per query in
 # practice, so a 0.3s spacing keeps us well under any soft throttle while
@@ -1034,6 +1036,14 @@ def _nuforc_fetch_month_live(yyyymm: str, cookie_jar: Path) -> list[dict]:
     index_url = _NUFORC_LIVE_INDEX_URL.format(yyyymm=yyyymm)
     ajax_url = _NUFORC_LIVE_AJAX_URL.format(yyyymm=yyyymm)
 
+    if not external_curl_fallback_enabled():
+        logger.warning(
+            "NUFORC live: external curl disabled on Windows for %s; "
+            "set SHADOWBROKER_ENABLE_WINDOWS_CURL_FALLBACK=1 to opt in.",
+            yyyymm,
+        )
+        return []
+
     # Step 1: GET the month index to capture session cookies + fresh nonce.
     try:
         index_res = subprocess.run(
@@ -1340,6 +1350,143 @@ def _build_recent_uap_sightings() -> list[dict]:
     return sightings
 
 
+def _split_uap_location(location: str) -> tuple[str, str, str]:
+    parts = [p.strip() for p in str(location or "").split(",") if p.strip()]
+    city = parts[0] if parts else ""
+    state = ""
+    country = ""
+    if len(parts) >= 2:
+        state = parts[1]
+    if len(parts) >= 3:
+        country = parts[-1]
+    if country and country.upper() in _US_COUNTRY_ALIASES:
+        country = "US"
+    return city, state, country
+
+
+def _build_uap_sightings_from_hf_mirror() -> list[dict]:
+    """Build visible UAP points from the public Hugging Face NUFORC mirror.
+
+    This is a resilience fallback for local/Windows runs where nuforc.org is
+    Cloudflare-gated and the Mapbox token is not configured. It is not as fresh
+    as the live NUFORC AJAX feed, but it keeps the layer visible and cached.
+    """
+    from services.fetchers.nuforc_enrichment import _HF_CSV_URL, _parse_date
+    from services.geocode_validate import coord_in_country
+
+    try:
+        response = fetch_with_curl(_HF_CSV_URL, timeout=180, follow_redirects=True)
+        if not response or response.status_code != 200:
+            logger.warning(
+                "UAP sightings: HF fallback failed HTTP %s",
+                getattr(response, "status_code", "None"),
+            )
+            return []
+    except Exception as e:
+        logger.warning("UAP sightings: HF fallback download failed: %s", e)
+        return []
+
+    candidates: list[dict] = []
+    try:
+        reader = csv.DictReader(io.StringIO(response.text))
+        for row in reader:
+            occurred = _parse_date(
+                row.get("Occurred", "")
+                or row.get("Date / Time", "")
+                or row.get("Date", "")
+            )
+            if not occurred:
+                continue
+            raw_location = _normalize_uap_location(
+                row.get("Location", "")
+                or row.get("City", "")
+                or row.get("location", "")
+            )
+            if not raw_location:
+                continue
+            city, state, country = _split_uap_location(raw_location)
+            if not city:
+                continue
+            sighting_id = str(row.get("Sighting", "") or "").strip()
+            if not sighting_id:
+                sighting_id = hashlib.sha1(
+                    f"{occurred}|{raw_location}|{row.get('Summary', '')}".encode("utf-8", "ignore")
+                ).hexdigest()[:12]
+            summary = (row.get("Summary", "") or row.get("Text", "") or "Sighting reported").strip()
+            if len(summary) > 280:
+                summary = summary[:277] + "..."
+            candidates.append({
+                "id": f"NUFORC-{sighting_id}",
+                "occurred": occurred,
+                "posted": _parse_date(row.get("Posted", "") or row.get("Reported", "")) or occurred,
+                "location": raw_location,
+                "city": city,
+                "state": state,
+                "country": country or _uap_country_from_location(raw_location, state),
+                "shape_raw": (row.get("Shape", "") or "Unknown").strip(),
+                "duration": (row.get("Duration", "") or "").strip(),
+                "summary": summary,
+            })
+    except Exception as e:
+        logger.warning("UAP sightings: HF fallback parse failed: %s", e)
+        return []
+
+    candidates.sort(key=lambda row: (row["occurred"], row["posted"], row["id"]), reverse=True)
+    candidates = candidates[:_NUFORC_HF_FALLBACK_LIMIT]
+
+    location_cache = _load_nuforc_location_cache()
+    sightings: list[dict] = []
+    geocoded = 0
+    for row in candidates:
+        coords = location_cache.get(row["location"])
+        if row["location"] not in location_cache and geocoded < _NUFORC_HF_GEOCODE_LIMIT:
+            try:
+                coords = _geocode_uap_location(
+                    row["location"], row["city"], row["state"], row["country"]
+                )
+            except Exception:
+                coords = None
+            location_cache[row["location"]] = coords
+            geocoded += 1
+            if geocoded < _NUFORC_HF_GEOCODE_LIMIT:
+                time.sleep(_NUFORC_GEOCODE_SPACING_S)
+        if not coords:
+            continue
+        if row.get("country"):
+            try:
+                inside = coord_in_country(coords[0], coords[1], row["country"])
+            except Exception:
+                inside = None
+            if inside is False:
+                continue
+        shape_raw = row["shape_raw"] or "Unknown"
+        sightings.append({
+            "id": row["id"],
+            "date_time": row["occurred"],
+            "city": row["city"],
+            "state": row["state"],
+            "country": row["country"],
+            "shape": _normalize_uap_shape(shape_raw) if shape_raw != "Unknown" else "unknown",
+            "shape_raw": shape_raw,
+            "duration": row["duration"],
+            "summary": row["summary"],
+            "posted": row["posted"],
+            "lat": float(coords[0]),
+            "lng": float(coords[1]),
+            "count": 1,
+            "source": "NUFORC-HF",
+        })
+
+    _save_nuforc_location_cache(location_cache)
+    logger.info(
+        "UAP sightings: %d mapped reports from HF fallback (%d candidates, %d geocoded)",
+        len(sightings),
+        len(candidates),
+        geocoded,
+    )
+    return sightings
+
+
 @with_retry(max_retries=1, base_delay=5)
 def fetch_uap_sightings(*, force_refresh: bool = False):
     """Fetch last-year UAP sightings from NUFORC.
@@ -1355,12 +1502,18 @@ def fetch_uap_sightings(*, force_refresh: bool = False):
 
     sightings = _load_nuforc_sightings_cache(force_refresh=force_refresh)
     if sightings is None:
-        sightings = _build_recent_uap_sightings()
-        _save_nuforc_sightings_cache(sightings)
+        try:
+            sightings = _build_recent_uap_sightings()
+        except Exception as e:
+            logger.warning("UAP sightings: live NUFORC rebuild failed, using fallback: %s", e)
+            sightings = _build_uap_sightings_from_hf_mirror()
+        if sightings:
+            _save_nuforc_sightings_cache(sightings)
 
     with _data_lock:
-        latest_data["uap_sightings"] = sightings
-    _mark_fresh("uap_sightings")
+        latest_data["uap_sightings"] = sightings or []
+    if sightings:
+        _mark_fresh("uap_sightings")
     return
 
     cutoff = datetime.utcnow() - timedelta(days=_NUFORC_RECENT_DAYS)

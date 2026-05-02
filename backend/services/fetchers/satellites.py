@@ -15,6 +15,7 @@ Analysis features (derived from cached TLEs — no extra network requests):
 import math
 import time
 import json
+import os
 import re
 import logging
 import requests
@@ -41,6 +42,38 @@ def _gmst(jd_ut1):
 # CelesTrak fair use: fetch at most once per 24 hours (86400s).
 # SGP4 propagation runs every 60s using cached TLEs — positions stay live.
 _CELESTRAK_FETCH_INTERVAL = 86400  # 24 hours
+_MIN_VISIBLE_SATELLITE_CATALOG = int(os.environ.get("SHADOWBROKER_MIN_VISIBLE_SATELLITES", "350"))
+_MAX_VISIBLE_SATELLITE_CATALOG = int(os.environ.get("SHADOWBROKER_MAX_VISIBLE_SATELLITES", "450"))
+_CELESTRAK_VISIBLE_GROUPS = {
+    "military": {"mission": "military", "sat_type": "Military / Defense"},
+    "radar": {"mission": "sar", "sat_type": "Radar / SAR"},
+    "resource": {"mission": "earth_observation", "sat_type": "Earth Observation"},
+    "weather": {"mission": "weather", "sat_type": "Weather / Meteorology"},
+    "gnss": {"mission": "navigation", "sat_type": "GNSS / Navigation"},
+    "science": {"mission": "science", "sat_type": "Science"},
+}
+_TLE_VISIBLE_FALLBACK_TERMS = {
+    "COSMOS": {"mission": "military", "sat_type": "Russian / Soviet Military"},
+    "USA": {"mission": "military", "sat_type": "US Military / NRO"},
+    "NROL": {"mission": "military", "sat_type": "Classified NRO"},
+    "GPS": {"mission": "navigation", "sat_type": "GPS Navigation"},
+    "GALILEO": {"mission": "navigation", "sat_type": "Galileo Navigation"},
+    "BEIDOU": {"mission": "navigation", "sat_type": "BeiDou Navigation"},
+    "GLONASS": {"mission": "navigation", "sat_type": "GLONASS Navigation"},
+    "NOAA": {"mission": "weather", "sat_type": "NOAA Weather"},
+    "METEOR": {"mission": "weather", "sat_type": "Meteor Weather"},
+    "SENTINEL": {"mission": "earth_observation", "sat_type": "Sentinel Earth Observation"},
+    "LANDSAT": {"mission": "earth_observation", "sat_type": "Landsat Earth Observation"},
+    "WORLDVIEW": {"mission": "commercial_imaging", "sat_type": "Maxar High-Res"},
+    "PLEIADES": {"mission": "commercial_imaging", "sat_type": "Airbus Imaging"},
+    "SKYSAT": {"mission": "commercial_imaging", "sat_type": "Planet Video"},
+    "JILIN": {"mission": "commercial_imaging", "sat_type": "Jilin Imaging"},
+    "FLOCK": {"mission": "commercial_imaging", "sat_type": "PlanetScope"},
+    "LEMUR": {"mission": "commercial_rf", "sat_type": "Spire RF / AIS"},
+    "ICEYE": {"mission": "sar", "sat_type": "ICEYE SAR"},
+    "UMBRA": {"mission": "sar", "sat_type": "Umbra SAR"},
+    "CAPELLA": {"mission": "sar", "sat_type": "Capella SAR"},
+}
 _sat_gp_cache = {"data": None, "last_fetch": 0, "source": "none", "last_modified": None}
 _sat_classified_cache = {"data": None, "gp_fetch_ts": 0}
 _SAT_CACHE_PATH = Path(__file__).parent.parent.parent / "data" / "sat_gp_cache.json"
@@ -564,9 +597,61 @@ def _parse_tle_to_gp(name, norad_id, line1, line2):
         return None
 
 
+def _annotate_celestrak_group(records: list[dict], group: str) -> list[dict]:
+    meta = _CELESTRAK_VISIBLE_GROUPS.get(group, {})
+    out = []
+    for sat in records:
+        if not isinstance(sat, dict):
+            continue
+        item = dict(sat)
+        item["_SB_GROUP"] = group
+        if meta:
+            item["_SB_GROUP_META"] = meta
+        out.append(item)
+    return out
+
+
+def _fetch_visible_celestrak_catalog(headers: dict | None = None) -> list[dict]:
+    """Fetch bounded CelesTrak groups used by the visible satellite layer.
+
+    The full ``active`` catalog is too large and frequently times out on local
+    startup. These groups cover the visible operational set users expect
+    without pulling Starlink-scale constellations into the map.
+    """
+    headers = headers or {}
+    merged: dict[int, dict] = {}
+    for group in _CELESTRAK_VISIBLE_GROUPS:
+        url = f"https://celestrak.org/NORAD/elements/gp.php?GROUP={group}&FORMAT=json"
+        try:
+            response = fetch_with_curl(url, timeout=15, headers=headers)
+            if response.status_code != 200:
+                logger.debug("Satellites: CelesTrak group %s returned HTTP %s", group, response.status_code)
+                continue
+            gp_data = response.json()
+            if not isinstance(gp_data, list):
+                continue
+            for sat in _annotate_celestrak_group(gp_data, group):
+                norad_id = sat.get("NORAD_CAT_ID")
+                if norad_id is None:
+                    continue
+                merged[int(norad_id)] = sat
+            time.sleep(0.35)
+        except (
+            requests.RequestException,
+            ConnectionError,
+            TimeoutError,
+            ValueError,
+            KeyError,
+            json.JSONDecodeError,
+            OSError,
+        ) as e:
+            logger.warning("Satellites: Failed to fetch CelesTrak group %s: %s", group, e)
+    return list(merged.values())
+
+
 def _fetch_satellites_from_tle_api():
     """Fallback: fetch satellite TLEs from tle.ivanstanojevic.me when CelesTrak is blocked."""
-    search_terms = set()
+    search_terms = set(_TLE_VISIBLE_FALLBACK_TERMS)
     for key, _ in _SAT_INTEL_DB:
         term = key.split()[0] if len(key.split()) > 1 and key.split()[0] in ("USA", "NROL") else key
         search_terms.add(term)
@@ -591,8 +676,13 @@ def _fetch_satellites_from_tle_api():
                     sat_id = gp.get("NORAD_CAT_ID")
                     if sat_id not in seen_ids:
                         seen_ids.add(sat_id)
+                        if term in _TLE_VISIBLE_FALLBACK_TERMS:
+                            gp["_SB_GROUP"] = f"tle:{term}"
+                            gp["_SB_GROUP_META"] = _TLE_VISIBLE_FALLBACK_TERMS[term]
                         all_results.append(gp)
-            time.sleep(1)  # Polite delay between requests
+                        if len(all_results) >= _MAX_VISIBLE_SATELLITE_CATALOG:
+                            return all_results
+            time.sleep(0.15)  # Polite delay between requests
         except (
             requests.RequestException,
             ConnectionError,
@@ -644,18 +734,34 @@ def fetch_satellites():
 
         if (
             _sat_gp_cache["data"] is None
+            or len(_sat_gp_cache.get("data") or []) < _MIN_VISIBLE_SATELLITE_CATALOG
             or (now_ts - _sat_gp_cache["last_fetch"]) > _CELESTRAK_FETCH_INTERVAL
         ):
-            gp_urls = [
-                "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=json",
-                "https://celestrak.com/NORAD/elements/gp.php?GROUP=active&FORMAT=json",
-            ]
             # Build conditional request headers (CelesTrak fair use)
             headers = {}
             if _sat_gp_cache.get("last_modified"):
                 headers["If-Modified-Since"] = _sat_gp_cache["last_modified"]
 
+            visible_data = _fetch_visible_celestrak_catalog(headers=headers)
+            if len(visible_data) >= _MIN_VISIBLE_SATELLITE_CATALOG:
+                _sat_gp_cache["data"] = visible_data
+                _sat_gp_cache["last_fetch"] = now_ts
+                _sat_gp_cache["source"] = "celestrak_visible_groups"
+                _save_sat_cache(visible_data)
+                _snapshot_current_tles(visible_data)
+                logger.info(
+                    "Satellites: Downloaded %d GP records from visible CelesTrak groups",
+                    len(visible_data),
+                )
+
+            gp_urls = [
+                "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=json",
+                "https://celestrak.com/NORAD/elements/gp.php?GROUP=active&FORMAT=json",
+            ]
+
             for url in gp_urls:
+                if len(_sat_gp_cache.get("data") or []) >= _MIN_VISIBLE_SATELLITE_CATALOG:
+                    break
                 try:
                     response = fetch_with_curl(url, timeout=15, headers=headers)
                     if response.status_code == 304:
@@ -696,7 +802,10 @@ def fetch_satellites():
                     logger.warning(f"Satellites: Failed to fetch from {url}: {e}")
                     continue
 
-            if _sat_gp_cache["data"] is None:
+            if (
+                _sat_gp_cache["data"] is None
+                or len(_sat_gp_cache.get("data") or []) < _MIN_VISIBLE_SATELLITE_CATALOG
+            ):
                 logger.info("Satellites: CelesTrak unreachable, trying TLE fallback API...")
                 try:
                     fallback_data = _fetch_satellites_from_tle_api()
@@ -757,6 +866,9 @@ def fetch_satellites():
                     owner = sat.get("OWNER", sat.get("OBJECT_OWNER", ""))
                     if owner in _OWNER_CODE_MAP:
                         intel = {"country": _OWNER_CODE_MAP[owner], "mission": "general", "sat_type": "Unclassified"}
+                if not intel and sat.get("_SB_GROUP_META"):
+                    intel = dict(sat["_SB_GROUP_META"])
+                    intel.setdefault("country", "Unknown")
                 if not intel:
                     continue
 

@@ -59,6 +59,8 @@ type FastDataProbe = {
   ships?: unknown[];
   sigint?: unknown[];
   cctv?: unknown[];
+  news?: unknown[];
+  threat_level?: unknown;
 };
 
 function hasMeaningfulFastData(json: FastDataProbe): boolean {
@@ -100,10 +102,36 @@ export function useDataPolling() {
     _slowEtagRef = slowEtag;
 
     let hasData = false;
+    let fetchedStartupFastPayload = false;
     let fastTimerId: ReturnType<typeof setTimeout> | null = null;
     let slowTimerId: ReturnType<typeof setTimeout> | null = null;
     const fastAbortRef = { current: null as AbortController | null };
     const slowAbortRef = { current: null as AbortController | null };
+
+    const fetchCriticalBootstrap = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/bootstrap/critical`, {
+          headers: { Accept: 'application/json' },
+        });
+        if (res.ok) {
+          setStoreBackendStatus('connected');
+          const json = await res.json();
+          mergeData(json);
+          if (hasMeaningfulFastData(json) || (json.news?.length || 0) > 0 || json.threat_level) {
+            hasData = true;
+          }
+        }
+      } catch (e) {
+        const aborted =
+          typeof e === 'object' &&
+          e !== null &&
+          'name' in e &&
+          (e as { name?: string }).name === 'AbortError';
+        if (!aborted) {
+          console.warn("Critical bootstrap fetch will retry via live polling", e);
+        }
+      }
+    };
 
     const fetchFastData = async () => {
       if (fastTimerId) {
@@ -116,9 +144,11 @@ export function useDataPolling() {
       const controller = new AbortController();
       fastAbortRef.current = controller;
       try {
+        const useStartupPayload = !fetchedStartupFastPayload && !fastEtag.current;
         const headers: Record<string, string> = {};
-        if (fastEtag.current) headers['If-None-Match'] = fastEtag.current;
-        const res = await fetch(`${API_BASE}/api/live-data/fast`, {
+        if (!useStartupPayload && fastEtag.current) headers['If-None-Match'] = fastEtag.current;
+        const url = `${API_BASE}/api/live-data/fast${useStartupPayload ? '?initial=1' : ''}`;
+        const res = await fetch(url, {
           headers,
           signal: controller.signal,
         });
@@ -129,7 +159,10 @@ export function useDataPolling() {
         }
         if (res.ok) {
           setStoreBackendStatus('connected');
-          fastEtag.current = res.headers.get('etag') || null;
+          // Do not keep the capped startup ETag. The next steady poll should
+          // request the full fast dataset and replace the representative first paint.
+          fastEtag.current = useStartupPayload ? null : res.headers.get('etag') || null;
+          if (useStartupPayload) fetchedStartupFastPayload = true;
           const json = await res.json();
           mergeData(json);
           if (hasMeaningfulFastData(json)) hasData = true;
@@ -141,7 +174,7 @@ export function useDataPolling() {
           'name' in e &&
           (e as { name?: string }).name === 'AbortError';
         if (!aborted) {
-          console.error("Failed fetching fast live data", e);
+          console.warn("Fast live data fetch will retry after runtime is reachable", e);
           setStoreBackendStatus('disconnected');
         }
       } finally {
@@ -177,7 +210,7 @@ export function useDataPolling() {
           'name' in e &&
           (e as { name?: string }).name === 'AbortError';
         if (!aborted) {
-          console.error("Failed fetching slow live data", e);
+          console.warn("Slow live data fetch will retry after runtime is reachable", e);
         }
       } finally {
         if (slowAbortRef.current === controller) {
@@ -191,7 +224,8 @@ export function useDataPolling() {
     const scheduleNext = (tier: 'fast' | 'slow') => {
       if (tier === 'fast') {
         const delay = hasData ? 15000 : 3000; // 3s startup retry → 15s steady state
-        fastTimerId = setTimeout(fetchFastData, delay);
+        const needsFullFastPayload = fetchedStartupFastPayload && !fastEtag.current;
+        fastTimerId = setTimeout(fetchFastData, needsFullFastPayload ? 750 : delay);
       } else {
         const delay = hasData ? 120000 : 5000; // 5s startup retry → 120s steady state
         slowTimerId = setTimeout(fetchSlowData, delay);
@@ -208,8 +242,12 @@ export function useDataPolling() {
     };
     window.addEventListener(LAYER_TOGGLE_EVENT, onLayerToggle);
 
-    fetchFastData();
-    fetchSlowData();
+    void (async () => {
+      await fetchCriticalBootstrap();
+      fetchFastData();
+      // Let the bootstrap/fast payload paint before competing with the slow tier.
+      slowTimerId = setTimeout(fetchSlowData, 5000);
+    })();
 
     return () => {
       window.removeEventListener(LAYER_TOGGLE_EVENT, onLayerToggle);

@@ -51,6 +51,10 @@ const NO_STORE_PROXY_HEADERS = {
   Pragma: 'no-cache',
 };
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function isSensitiveProxyPath(pathSegments: string[]): boolean {
   const joined = pathSegments.join('/');
   if (!joined) return false;
@@ -76,8 +80,7 @@ async function proxy(req: NextRequest, pathSegments: string[]): Promise<NextResp
       isMesh &&
       !isSensitiveMeshPath &&
       ['POST', 'PUT', 'DELETE'].includes(req.method.toUpperCase()) &&
-      (meshSegments.join('/') === 'send' ||
-        meshSegments.join('/') === 'vote' ||
+      (meshSegments.join('/') === 'vote' ||
         meshSegments.join('/') === 'report' ||
         meshSegments.join('/') === 'gate/create' ||
         (meshSegments[0] === 'gate' && meshSegments[2] === 'message') ||
@@ -191,7 +194,7 @@ async function proxy(req: NextRequest, pathSegments: string[]): Promise<NextResp
     }
 
     const isBodyless = req.method === 'GET' || req.method === 'HEAD';
-    let upstream: Response;
+    let upstream: Response | null = null;
     const requestInit: RequestInit & { duplex?: 'half' } = {
       method: req.method,
       headers: forwardHeaders,
@@ -202,12 +205,26 @@ async function proxy(req: NextRequest, pathSegments: string[]): Promise<NextResp
       // Required for streaming request bodies in Node.js fetch
       requestInit.duplex = 'half';
     }
-    try {
-      upstream = await fetch(targetUrl.toString(), requestInit);
-    } catch {
+    const maxAttempts = isBodyless ? 18 : 1;
+    let fetchError: unknown = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        upstream = await fetch(targetUrl.toString(), requestInit);
+        fetchError = null;
+        break;
+      } catch (error) {
+        fetchError = error;
+        if (attempt >= maxAttempts) break;
+        await sleep(250);
+      }
+    }
+    if (!upstream) {
       return new NextResponse(JSON.stringify({ error: 'Backend unavailable' }), {
         status: 502,
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Proxy-Error': fetchError instanceof Error ? fetchError.name : 'fetch_failed',
+        },
       });
     }
 

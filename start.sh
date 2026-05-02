@@ -1,7 +1,13 @@
 #!/bin/bash
 
-# Graceful shutdown: kill all child processes on exit/interrupt
-trap 'kill 0' EXIT SIGINT SIGTERM
+# Graceful shutdown: stop child processes without signaling the parent shell.
+cleanup() {
+    trap - EXIT SIGINT SIGTERM
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -P $$ 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT SIGINT SIGTERM
 
 echo "======================================================="
 echo "   S H A D O W B R O K E R   -   macOS / Linux Start   "
@@ -252,4 +258,4 @@ echo "======================================================="
 echo "  (Press Ctrl+C to stop)"
 echo ""
 
-npm run dev
+node scripts/dev-all.cjs

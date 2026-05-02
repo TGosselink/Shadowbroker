@@ -200,6 +200,7 @@ from services.data_fetcher import (
     start_scheduler,
     stop_scheduler,
     get_latest_data,
+    seed_startup_caches,
 )
 from services.ais_stream import start_ais_stream, stop_ais_stream
 from services.carrier_tracker import start_carrier_tracker, stop_carrier_tracker
@@ -2232,6 +2233,11 @@ async def lifespan(app: FastAPI):
 
         threading.Thread(target=_prime_aircraft_database, daemon=True).start()
 
+        # Seed cached first-paint layers before accepting requests. This is
+        # disk-only and keeps the critical bootstrap endpoint independent from
+        # slow network warmup.
+        seed_startup_caches()
+
         # Start the recurring scheduler (fast=60s, slow=30min).
         start_scheduler()
 
@@ -2239,6 +2245,9 @@ async def lifespan(app: FastAPI):
         # is listening on port 8000 instantly.  The frontend's adaptive polling
         # (retries every 3s) will pick up data piecemeal as each fetcher finishes.
         def _background_preload():
+            delay_s = float(os.environ.get("SHADOWBROKER_STARTUP_PRELOAD_DELAY_S", "2.0") or 0)
+            if delay_s > 0:
+                time.sleep(delay_s)
             logger.info("=== PRELOADING DATA (background â€” server already accepting requests) ===")
             try:
                 update_all_data(startup_mode=True)
@@ -3472,6 +3481,46 @@ def _sigint_totals_for_items(items: list) -> dict[str, int]:
     return totals
 
 
+def _cap_startup_items(items: list | None, max_items: int) -> list:
+    if not items:
+        return []
+    if len(items) <= max_items:
+        return items
+    return items[:max_items]
+
+
+def _cap_fast_startup_payload(payload: dict) -> dict:
+    """Trim high-volume layers for the first dashboard paint.
+
+    The full fast payload can legitimately contain tens of thousands of AIS,
+    ADS-B, SIGINT, and CCTV records. Returning all of that during app startup
+    blocks the first map render behind serialization/proxy/network pressure.
+    This startup payload paints representative live data immediately; the next
+    normal poll replaces it with the full dataset.
+    """
+    capped = dict(payload)
+    capped["commercial_flights"] = _cap_startup_items(capped.get("commercial_flights"), 800)
+    capped["private_flights"] = _cap_startup_items(capped.get("private_flights"), 300)
+    capped["private_jets"] = _cap_startup_items(capped.get("private_jets"), 150)
+    capped["ships"] = _cap_startup_items(capped.get("ships"), 1500)
+    capped["cctv"] = []
+    capped["sigint"] = _cap_startup_items(capped.get("sigint"), 500)
+    capped["trains"] = _cap_startup_items(capped.get("trains"), 100)
+    capped["startup_payload"] = True
+    return capped
+
+
+def _cap_fast_dashboard_payload(payload: dict) -> dict:
+    capped = dict(payload)
+    capped["commercial_flights"] = _downsample_points(capped.get("commercial_flights") or [], 6000)
+    capped["private_flights"] = _downsample_points(capped.get("private_flights") or [], 1500)
+    capped["private_jets"] = _downsample_points(capped.get("private_jets") or [], 1500)
+    capped["ships"] = _downsample_points(capped.get("ships") or [], 8000)
+    capped["cctv"] = _downsample_points(capped.get("cctv") or [], 2500)
+    capped["sigint"] = _downsample_points(capped.get("sigint") or [], 5000)
+    return capped
+
+
 @app.get("/api/live-data/fast")
 @limiter.limit("120/minute")
 async def live_data_fast(
@@ -3482,8 +3531,9 @@ async def live_data_fast(
     w: float = Query(None, description="West bound (ignored)", ge=-180, le=180),
     n: float = Query(None, description="North bound (ignored)", ge=-90, le=90),
     e: float = Query(None, description="East bound (ignored)", ge=-180, le=180),
+    initial: bool = Query(False, description="Return a capped startup payload for first paint"),
 ):
-    etag = _current_etag(prefix="fast|full|")
+    etag = _current_etag(prefix="fast|initial|" if initial else "fast|full|")
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
 
@@ -3548,6 +3598,10 @@ async def live_data_fast(
         "trains": (d.get("trains") or []) if active_layers.get("trains", True) else [],
         "freshness": freshness,
     }
+    if initial:
+        payload = _cap_fast_startup_payload(payload)
+    else:
+        payload = _cap_fast_dashboard_payload(payload)
     return Response(
         content=orjson.dumps(_sanitize_payload(payload)),
         media_type="application/json",
@@ -3609,6 +3663,7 @@ async def live_data_slow(
         "correlations",
         "threat_level",
         "trending_markets",
+        "fimi",
         "uap_sightings",
         "wastewater",
         "sar_scenes",
@@ -3621,6 +3676,7 @@ async def live_data_slow(
         "last_updated": d.get("last_updated"),
         "threat_level": d.get("threat_level"),
         "trending_markets": d.get("trending_markets", []),
+        "fimi": d.get("fimi", {}),
         "news": d.get("news", []),
         "stocks": d.get("stocks", {}),
         "financial_source": d.get("financial_source", ""),

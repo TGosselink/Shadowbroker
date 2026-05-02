@@ -826,6 +826,8 @@ export interface DashboardData {
   cctv_total?: number;
   satnogs_total?: number;
   tinygs_total?: number;
+  bootstrap_ready?: boolean;
+  bootstrap_payload?: boolean;
   sigint_totals?: {
     total?: number;
     meshtastic?: number;

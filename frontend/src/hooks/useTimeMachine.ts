@@ -387,7 +387,7 @@ export async function refreshSnapshotList(): Promise<void> {
     const json = await res.json();
     updateTimelineFromSnapshots(sortSnapshots(json.snapshots || []));
   } catch (e) {
-    console.error('Time Machine: failed to fetch snapshots', e);
+    console.warn('Time Machine snapshots will retry after runtime is reachable', e);
   }
 }
 
@@ -402,7 +402,7 @@ export async function refreshHourlyIndex(): Promise<void> {
       setState({ hourlyIndex: json.hours || {} });
     }
   } catch (e) {
-    console.error('Time Machine: failed to fetch hourly index', e);
+    console.warn('Time Machine hourly index will retry after runtime is reachable', e);
   }
 }
 

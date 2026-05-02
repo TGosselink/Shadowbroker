@@ -225,6 +225,11 @@ def _installed() -> bool:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        # Windows PIDs are reused and os.kill(pid, 0) is not a reliable
+        # ownership check. A persisted wormhole_status.json PID from an older
+        # run must never be treated as a process we own.
+        return False
     try:
         os.kill(pid, 0)
     except OSError:
@@ -268,7 +273,12 @@ def _current_runtime_state() -> dict[str, Any]:
         pid = int(_PROCESS.pid or 0)
     elif _pid_alive(pid):
         running = True
+    elif _probe_ready(timeout_s=0.35):
+        running = True
+        pid = 0
     ready = running and _probe_ready()
+    if not running:
+        pid = 0
     transport_active = status.get("transport_active", "") if ready else ""
     proxy_active = status.get("proxy_active", "") if ready else ""
     effective_transport = str(transport_active or settings.get("transport", "direct") or "direct").lower()
@@ -489,7 +499,7 @@ def disconnect_wormhole(*, reason: str = "disconnect") -> dict[str, Any]:
                     _PROCESS.kill()
                 except Exception:
                     pass
-        elif _pid_alive(pid):
+        elif os.name != "nt" and _pid_alive(pid):
             try:
                 os.kill(pid, signal.SIGTERM)
             except Exception:

@@ -30,7 +30,7 @@ import type { ActiveLayers, KiwiSDR, Scanner, SelectedEntity } from '@/types/das
 import type { ShodanSearchMatch } from '@/types/shodan';
 import { API_BASE } from '@/lib/api';
 import { useDataPolling, LAYER_TOGGLE_EVENT } from '@/hooks/useDataPolling';
-import { useBackendStatus, useDataKey } from '@/hooks/useDataStore';
+import { useBackendStatus, useDataKey, useDataKeys } from '@/hooks/useDataStore';
 import { useReverseGeocode } from '@/hooks/useReverseGeocode';
 import { useRegionDossier } from '@/hooks/useRegionDossier';
 import { useAgentActions } from '@/hooks/useAgentActions';
@@ -61,6 +61,9 @@ const MaplibreViewer = dynamic(() => import('@/components/MaplibreViewer'), { ss
 
 export default function Dashboard() {
   const viewBoundsRef = useRef<{ south: number; west: number; north: number; east: number } | null>(null);
+  // Start the critical map data request before panel/control-plane effects.
+  // Non-map widgets can warm up after this; first paint needs flights, ships, and intel first.
+  useDataPolling();
   const { mouseCoords, locationLabel, handleMouseCoords } = useReverseGeocode();
   const [selectedEntity, setSelectedEntity] = useState<SelectedEntity | null>(null);
   const [trackedSdr, setTrackedSdr] = useState<KiwiSDR | null>(null);
@@ -211,10 +214,35 @@ export default function Dashboard() {
   const [shodanResults, setShodanResults] = useState<ShodanSearchMatch[]>([]);
   const [, setShodanQueryLabel] = useState('');
   const [shodanStyle, setShodanStyle] = useState<import('@/types/shodan').ShodanStyleConfig>({ shape: 'circle', color: '#16a34a', size: 'md' });
-  useDataPolling();
   const backendStatus = useBackendStatus();
   const spaceWeather = useDataKey('space_weather');
   const feedHealth = useFeedHealth();
+  const bootSignals = useDataKeys([
+    'bootstrap_ready',
+    'commercial_flights',
+    'military_flights',
+    'tracked_flights',
+    'ships',
+    'news',
+    'threat_level',
+  ] as const);
+  const criticalPaintReady = Boolean(
+    bootSignals.bootstrap_ready ||
+      (bootSignals.commercial_flights?.length || 0) > 0 ||
+      (bootSignals.military_flights?.length || 0) > 0 ||
+      (bootSignals.tracked_flights?.length || 0) > 0 ||
+      (bootSignals.ships?.length || 0) > 0 ||
+      (bootSignals.news?.length || 0) > 0 ||
+      bootSignals.threat_level,
+  );
+  const [secondaryBootReady, setSecondaryBootReady] = useState(false);
+
+  useEffect(() => {
+    if (secondaryBootReady) return;
+    const delay = criticalPaintReady ? 900 : 5500;
+    const id = window.setTimeout(() => setSecondaryBootReady(true), delay);
+    return () => window.clearTimeout(id);
+  }, [criticalPaintReady, secondaryBootReady]);
 
   // Global keyboard shortcuts
   useKeyboardShortcuts({
@@ -249,6 +277,7 @@ export default function Dashboard() {
   const layersTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialLayerSyncRef = useRef(false);
   useEffect(() => {
+    if (!secondaryBootReady) return;
     const syncLayers = (triggerRefetch: boolean) =>
       fetch(`${API_BASE}/api/layers`, {
         method: 'POST',
@@ -258,7 +287,7 @@ export default function Dashboard() {
         if (triggerRefetch) {
           window.dispatchEvent(new Event(LAYER_TOGGLE_EVENT));
         }
-      }).catch((e) => console.error('Failed to update backend layers:', e));
+      }).catch((e) => console.warn('Backend layer sync will retry after runtime is reachable:', e));
 
     if (layersTimerRef.current) clearTimeout(layersTimerRef.current);
     if (!initialLayerSyncRef.current) {
@@ -272,7 +301,7 @@ export default function Dashboard() {
     return () => {
       if (layersTimerRef.current) clearTimeout(layersTimerRef.current);
     };
-  }, [activeLayers]);
+  }, [activeLayers, secondaryBootReady]);
 
   // Left panel accordion state
   const [leftDataMinimized, setLeftDataMinimized] = useState(false);
@@ -393,12 +422,28 @@ export default function Dashboard() {
   };
 
   const [activeFilters, setActiveFilters] = useState<Record<string, string[]>>({});
+  const firstPaintActiveLayers = useMemo<ActiveLayers>(() => {
+    if (secondaryBootReady) return activeLayers;
+    return {
+      ...activeLayers,
+      cctv: false,
+      sar: false,
+      gibs_imagery: false,
+      highres_satellite: false,
+      sentinel_hub: false,
+      viirs_nightlights: false,
+      psk_reporter: false,
+      tinygs: false,
+      datacenters: false,
+      power_plants: false,
+    };
+  }, [activeLayers, secondaryBootReady]);
   // Agent fly_to handler (sar_focus_aoi etc.) — wired here now that
   // setFlyToLocation is in scope.  show_image is routed through
   // useAgentActions at the top of Dashboard.
   useAgentActions(handleMapRightClick, ({ lat, lng }) => {
     setFlyToLocation({ lat, lng, ts: Date.now() });
-  });
+  }, secondaryBootReady);
 
   // Eavesdrop Mode State
   const [isEavesdropping] = useState(false);
@@ -415,7 +460,7 @@ export default function Dashboard() {
         {/* MAPLIBRE WEBGL OVERLAY */}
         <ErrorBoundary name="Map">
           <MaplibreViewer
-            activeLayers={activeLayers}
+            activeLayers={firstPaintActiveLayers}
             activeFilters={activeFilters}
             effects={memoizedEffects}
             onEntityClick={setSelectedEntity}
@@ -502,74 +547,87 @@ export default function Dashboard() {
             >
               {/* 1. DATA LAYERS (Top) */}
               <div className="contents" style={{ direction: 'ltr' }}>
-                <ErrorBoundary name="WorldviewLeftPanel">
-                  <WorldviewLeftPanel
-                    activeLayers={activeLayers}
-                    setActiveLayers={setActiveLayers}
-                    shodanResultCount={shodanResults.length}
-                    onSettingsClick={() => setSettingsOpen(true)}
-                    onLegendClick={() => setLegendOpen(true)}
-                    onOpenSarAoiEditor={() => setSarAoiEditorOpen(true)}
-                    gibsDate={gibsDate}
-                    setGibsDate={setGibsDate}
-                    gibsOpacity={gibsOpacity}
-                    setGibsOpacity={setGibsOpacity}
-                    sentinelDate={sentinelDate}
-                    setSentinelDate={setSentinelDate}
-                    sentinelOpacity={sentinelOpacity}
-                    setSentinelOpacity={setSentinelOpacity}
-                    sentinelPreset={sentinelPreset}
-                    setSentinelPreset={setSentinelPreset}
-                    onEntityClick={setSelectedEntity}
-                    onFlyTo={handleFlyTo}
-                    trackedSdr={trackedSdr}
-                    setTrackedSdr={setTrackedSdr}
-                    trackedScanner={trackedScanner}
-                    setTrackedScanner={setTrackedScanner}
-                    isMinimized={leftDataMinimized}
-                    onMinimizedChange={setLeftDataMinimized}
-                  />
-                </ErrorBoundary>
+                {secondaryBootReady ? (
+                  <ErrorBoundary name="WorldviewLeftPanel">
+                    <WorldviewLeftPanel
+                      activeLayers={activeLayers}
+                      setActiveLayers={setActiveLayers}
+                      shodanResultCount={shodanResults.length}
+                      onSettingsClick={() => setSettingsOpen(true)}
+                      onLegendClick={() => setLegendOpen(true)}
+                      onOpenSarAoiEditor={() => setSarAoiEditorOpen(true)}
+                      gibsDate={gibsDate}
+                      setGibsDate={setGibsDate}
+                      gibsOpacity={gibsOpacity}
+                      setGibsOpacity={setGibsOpacity}
+                      sentinelDate={sentinelDate}
+                      setSentinelDate={setSentinelDate}
+                      sentinelOpacity={sentinelOpacity}
+                      setSentinelOpacity={setSentinelOpacity}
+                      sentinelPreset={sentinelPreset}
+                      setSentinelPreset={setSentinelPreset}
+                      onEntityClick={setSelectedEntity}
+                      onFlyTo={handleFlyTo}
+                      trackedSdr={trackedSdr}
+                      setTrackedSdr={setTrackedSdr}
+                      trackedScanner={trackedScanner}
+                      setTrackedScanner={setTrackedScanner}
+                      isMinimized={leftDataMinimized}
+                      onMinimizedChange={setLeftDataMinimized}
+                    />
+                  </ErrorBoundary>
+                ) : (
+                  <div className="bg-[#05090d]/95 border border-cyan-900/50 p-4 font-mono text-cyan-500/70">
+                    <div className="text-[11px] tracking-[0.2em] text-cyan-400 font-bold">DATA LAYERS</div>
+                    <div className="mt-3 text-[10px] tracking-wider">PRIORITIZING MAP FEEDS</div>
+                  </div>
+                )}
               </div>
 
               {/* 2. MESH CHAT (Middle) */}
-              <div className="contents" style={{ direction: 'ltr' }}>
-                <MeshChat
-                  onFlyTo={handleFlyTo}
-                  expanded={leftMeshExpanded}
-                  onExpandedChange={setLeftMeshExpanded}
-                  onSettingsClick={() => setSettingsOpen(true)}
-                  onTerminalToggle={openSecureTerminalLauncher}
-                  launchRequest={meshChatLaunchRequest}
-                />
-              </div>
+              {secondaryBootReady && (
+                <div className="contents" style={{ direction: 'ltr' }}>
+                  <MeshChat
+                    onFlyTo={handleFlyTo}
+                    expanded={leftMeshExpanded}
+                    onExpandedChange={setLeftMeshExpanded}
+                    onSettingsClick={() => setSettingsOpen(true)}
+                    onTerminalToggle={openSecureTerminalLauncher}
+                    launchRequest={meshChatLaunchRequest}
+                  />
+                </div>
+              )}
 
               {/* 3. SHODAN CONNECTOR (Bottom) */}
-              <div className="contents" style={{ direction: 'ltr' }}>
-                <ShodanPanel
-                  currentResults={shodanResults}
-                  onOpenSettings={() => setSettingsOpen(true)}
-                  settingsOpen={settingsOpen}
-                  onResultsChange={(results, queryLabel) => {
-                    setShodanResults(results);
-                    setShodanQueryLabel(queryLabel);
-                    setActiveLayers((prev) => ({ ...prev, shodan_overlay: results.length > 0 }));
-                  }}
-                  onSelectEntity={setSelectedEntity}
-                  onStyleChange={setShodanStyle}
-                  isMinimized={leftShodanMinimized}
-                  onMinimizedChange={setLeftShodanMinimized}
-                />
-              </div>
+              {secondaryBootReady && (
+                <div className="contents" style={{ direction: 'ltr' }}>
+                  <ShodanPanel
+                    currentResults={shodanResults}
+                    onOpenSettings={() => setSettingsOpen(true)}
+                    settingsOpen={settingsOpen}
+                    onResultsChange={(results, queryLabel) => {
+                      setShodanResults(results);
+                      setShodanQueryLabel(queryLabel);
+                      setActiveLayers((prev) => ({ ...prev, shodan_overlay: results.length > 0 }));
+                    }}
+                    onSelectEntity={setSelectedEntity}
+                    onStyleChange={setShodanStyle}
+                    isMinimized={leftShodanMinimized}
+                    onMinimizedChange={setLeftShodanMinimized}
+                  />
+                </div>
+              )}
 
               {/* 4. AI INTEL (Below Shodan) */}
-              <div className="contents" style={{ direction: 'ltr' }}>
-                <AIIntelPanel
-                  onFlyTo={handleFlyTo}
-                  pinPlacementMode={pinPlacementMode}
-                  onPinPlacementModeChange={setPinPlacementMode}
-                />
-              </div>
+              {secondaryBootReady && (
+                <div className="contents" style={{ direction: 'ltr' }}>
+                  <AIIntelPanel
+                    onFlyTo={handleFlyTo}
+                    pinPlacementMode={pinPlacementMode}
+                    onPinPlacementModeChange={setPinPlacementMode}
+                  />
+                </div>
+              )}
             </motion.div>
 
             {/* LEFT SIDEBAR TOGGLE TAB — aligns with Data Layers section */}
@@ -647,11 +705,13 @@ export default function Dashboard() {
               {/* GLOBAL TICKER REPLACES MARKETS PANEL - RENDERED OUTSIDE THIS DIV */}
 
               {/* EVENT TIMELINE */}
-              <div className={`flex-shrink-0 ${rightFocusedPanel && rightFocusedPanel !== 'predictions' ? 'hidden' : ''}`}>
-                <ErrorBoundary name="TimelinePanel">
-                  <TimelinePanel />
-                </ErrorBoundary>
-              </div>
+              {secondaryBootReady && (
+                <div className={`flex-shrink-0 ${rightFocusedPanel && rightFocusedPanel !== 'predictions' ? 'hidden' : ''}`}>
+                  <ErrorBoundary name="TimelinePanel">
+                    <TimelinePanel />
+                  </ErrorBoundary>
+                </div>
+              )}
 
               {/* DATA FILTERS */}
               <div className={`flex-shrink-0 ${rightFocusedPanel && rightFocusedPanel !== 'filters' ? 'hidden' : ''}`}>

@@ -34,7 +34,7 @@ export function useImperativeSource(
     };
 
     const pushWhenReady = () => {
-      let attemptsRemaining = 20;
+      let attemptsRemaining = 150;
 
       const tryPush = () => {
         if (cancelled) return;
@@ -62,6 +62,7 @@ export function useImperativeSource(
       pushWhenReady();
     };
 
+    rawMap.on('load', handleStyleData);
     rawMap.on('styledata', handleStyleData);
 
     // Skip redundant writes for unchanged references, but keep the styledata
@@ -73,6 +74,7 @@ export function useImperativeSource(
 
     return () => {
       cancelled = true;
+      rawMap.off('load', handleStyleData);
       rawMap.off('styledata', handleStyleData);
       if (timerRef.current) clearTimeout(timerRef.current);
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);

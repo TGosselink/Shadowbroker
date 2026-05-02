@@ -105,7 +105,7 @@ _SLOW_FETCH_S = float(os.environ.get("FETCH_SLOW_THRESHOLD_S", "5"))
 # Hard wall-clock limit per individual fetch task.  A task that exceeds this
 # is treated as a failure so it cannot block an entire fetch tier indefinitely.
 _TASK_HARD_TIMEOUT_S = float(os.environ.get("FETCH_TASK_TIMEOUT_S", "120"))
-_FAST_STARTUP_CACHE_MAX_AGE_S = float(os.environ.get("FAST_STARTUP_CACHE_MAX_AGE_S", "300"))
+_FAST_STARTUP_CACHE_MAX_AGE_S = float(os.environ.get("FAST_STARTUP_CACHE_MAX_AGE_S", "21600"))
 _FAST_STARTUP_CACHE_PATH = Path(__file__).resolve().parents[1] / "data" / "fast_startup_cache.json"
 _FAST_STARTUP_CACHE_KEYS = (
     "commercial_flights",
@@ -122,6 +122,17 @@ _FAST_STARTUP_CACHE_KEYS = (
     "sigint",
     "sigint_totals",
     "trains",
+)
+_INTEL_STARTUP_CACHE_MAX_AGE_S = float(os.environ.get("INTEL_STARTUP_CACHE_MAX_AGE_S", "21600"))
+_INTEL_STARTUP_CACHE_PATH = Path(__file__).resolve().parents[1] / "data" / "intel_startup_cache.json"
+_INTEL_STARTUP_CACHE_KEYS = (
+    "news",
+    "gdelt",
+    "liveuamap",
+    "threat_level",
+    "trending_markets",
+    "correlations",
+    "fimi",
 )
 
 # Shared thread pool — reused across all fetch cycles instead of creating/destroying per tick
@@ -204,6 +215,77 @@ def _save_fast_startup_cache() -> None:
         logger.debug("Fast startup cache save skipped: %s", e)
 
 
+def _load_intel_startup_cache_if_available() -> bool:
+    """Seed the right-side intelligence panel from disk while live feeds warm up."""
+    if _INTEL_STARTUP_CACHE_MAX_AGE_S <= 0 or not _INTEL_STARTUP_CACHE_PATH.exists():
+        return False
+    try:
+        with _INTEL_STARTUP_CACHE_PATH.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        cached_at = float(payload.get("cached_at") or 0)
+        age_s = time.time() - cached_at
+        if cached_at <= 0 or age_s > _INTEL_STARTUP_CACHE_MAX_AGE_S:
+            logger.info("Skipping stale intel startup cache (age %.1fs)", age_s)
+            return False
+        layers = payload.get("layers") or {}
+        freshness = payload.get("freshness") or {}
+        loaded: list[str] = []
+        with _data_lock:
+            for key in _INTEL_STARTUP_CACHE_KEYS:
+                if key in layers:
+                    latest_data[key] = layers[key]
+                    loaded.append(key)
+            for key, ts in freshness.items():
+                source_timestamps[str(key)] = ts
+            if payload.get("last_updated"):
+                latest_data["last_updated"] = payload.get("last_updated")
+        if not loaded:
+            return False
+        from services.fetchers._store import bump_data_version
+
+        bump_data_version()
+        logger.info(
+            "Loaded intel startup cache for %d layers (age %.1fs) so Global Threat Intercept can paint early",
+            len(loaded),
+            age_s,
+        )
+        return True
+    except Exception as e:
+        logger.warning("Intel startup cache load failed (non-fatal): %s", e)
+        return False
+
+
+def _save_intel_startup_cache() -> None:
+    """Persist compact right-side intelligence data for the next cold start."""
+    try:
+        with _data_lock:
+            payload = {
+                "cached_at": time.time(),
+                "last_updated": latest_data.get("last_updated"),
+                "layers": {key: latest_data.get(key) for key in _INTEL_STARTUP_CACHE_KEYS},
+                "freshness": {
+                    key: source_timestamps.get(key)
+                    for key in _INTEL_STARTUP_CACHE_KEYS
+                    if source_timestamps.get(key)
+                },
+            }
+        safe_payload = _cache_json_safe(payload)
+        _INTEL_STARTUP_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = _INTEL_STARTUP_CACHE_PATH.with_suffix(".tmp")
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            json.dump(safe_payload, fh, separators=(",", ":"))
+        tmp_path.replace(_INTEL_STARTUP_CACHE_PATH)
+    except Exception as e:
+        logger.debug("Intel startup cache save skipped: %s", e)
+
+
+def seed_startup_caches() -> None:
+    """Load disk-backed first-paint caches without touching remote services."""
+    load_meshtastic_cache_if_available()
+    _load_fast_startup_cache_if_available()
+    _load_intel_startup_cache_if_available()
+
+
 # ---------------------------------------------------------------------------
 # Scheduler & Orchestration
 # ---------------------------------------------------------------------------
@@ -262,7 +344,6 @@ def update_fast_data():
         fetch_satellites,
         fetch_sigint,
         fetch_trains,
-        fetch_tinygs,
     ]
     _run_tasks("fast-tier", fast_funcs)
     with _data_lock:
@@ -289,6 +370,7 @@ def update_slow_data():
         fetch_cctv,
         fetch_kiwisdr,
         fetch_satnogs,
+        fetch_tinygs,
         fetch_frontlines,
         fetch_datacenters,
         fetch_military_bases,
@@ -313,6 +395,7 @@ def update_slow_data():
         logger.error("Correlation engine failed: %s", e)
     from services.fetchers._store import bump_data_version
     bump_data_version()
+    _save_intel_startup_cache()
     logger.info("Slow-tier update complete.")
 
 
@@ -324,8 +407,7 @@ def update_all_data(*, startup_mode: bool = False):
     """
     logger.info("Full data update starting (parallel)...")
     # Preload Meshtastic map cache immediately (instant, from disk)
-    load_meshtastic_cache_if_available()
-    _load_fast_startup_cache_if_available()
+    seed_startup_caches()
     with _data_lock:
         meshtastic_seeded = bool(latest_data.get("meshtastic_map_nodes"))
     futures = {
@@ -337,7 +419,6 @@ def update_all_data(*, startup_mode: bool = False):
         _SHARED_EXECUTOR.submit(fetch_unusual_whales): ("fetch_unusual_whales", time.perf_counter()),
         _SHARED_EXECUTOR.submit(fetch_fimi): ("fetch_fimi", time.perf_counter()),
         _SHARED_EXECUTOR.submit(fetch_gdelt): ("fetch_gdelt", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(update_liveuamap): ("update_liveuamap", time.perf_counter()),
         _SHARED_EXECUTOR.submit(fetch_uap_sightings): ("fetch_uap_sightings", time.perf_counter()),
         _SHARED_EXECUTOR.submit(fetch_wastewater): ("fetch_wastewater", time.perf_counter()),
         _SHARED_EXECUTOR.submit(fetch_crowdthreat): ("fetch_crowdthreat", time.perf_counter()),
@@ -353,6 +434,13 @@ def update_all_data(*, startup_mode: bool = False):
         logger.info(
             "Startup preload: Meshtastic cache already loaded, deferring remote map refresh to scheduled cadence"
         )
+    if not startup_mode:
+        futures[_SHARED_EXECUTOR.submit(update_liveuamap)] = (
+            "update_liveuamap",
+            time.perf_counter(),
+        )
+    else:
+        logger.info("Startup preload: deferring Playwright Liveuamap scraper to scheduled cadence")
     for future, (name, start) in futures.items():
         try:
             future.result(timeout=_TASK_HARD_TIMEOUT_S)

@@ -345,6 +345,7 @@ const MaplibreViewer = ({
   const data = useMemo(() => ({ ...coreData, ...extraData }) as DashboardData, [coreData, extraData]);
   const mapRef = useRef<MapRef>(null);
   const mapInitRef = useRef(false);
+  const [mapReady, setMapReady] = useState(false);
   const { theme } = useTheme();
   const mapThemeStyle = useMemo<maplibregl.StyleSpecification>(
     () => (theme === 'light' ? lightStyle : darkStyle) as maplibregl.StyleSpecification,
@@ -914,15 +915,20 @@ const MaplibreViewer = ({
   // Load Images into the Map Style once loaded
   const onMapLoad = useCallback((e: { target: maplibregl.Map }) => {
     initializeMap(e.target);
+    setMapReady(true);
   }, [initializeMap]);
 
   const onMapStyleData = useCallback((e: { target: maplibregl.Map }) => {
     initializeMap(e.target);
+    setMapReady(true);
   }, [initializeMap]);
 
   useEffect(() => {
     const map = mapRef.current?.getMap();
-    if (map) initializeMap(map);
+    if (map) {
+      initializeMap(map);
+      setMapReady(true);
+    }
   }, [initializeMap, theme]);
 
   // Build a set of tracked icao24s to exclude from other flight layers
@@ -1561,7 +1567,7 @@ const MaplibreViewer = ({
   }, [activeLayers.uap_sightings, activeLayers.wastewater, theme]);
 
   // --- Imperative source updates: bypass React reconciliation for GeoJSON layers ---
-  const mapForHook = mapRef.current;
+  const mapForHook = mapReady ? mapRef.current : null;
   useImperativeSource(mapForHook, 'commercial-flights', commFlightsGeoJSON);
   useImperativeSource(mapForHook, 'private-flights', privFlightsGeoJSON);
   useImperativeSource(mapForHook, 'private-jets', privJetsGeoJSON);

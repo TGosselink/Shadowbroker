@@ -35,6 +35,7 @@ interface AgentAction {
 export function useAgentActions(
   onShowImage: (coords: { lat: number; lng: number }) => void,
   onFlyTo?: (coords: { lat: number; lng: number; zoom?: number }) => void,
+  enabled = true,
 ) {
   const onShowImageRef = useRef(onShowImage);
   onShowImageRef.current = onShowImage;
@@ -70,9 +71,10 @@ export function useAgentActions(
 
   useEffect(() => {
     // Poll every 3 seconds — lightweight endpoint, ~50 bytes when empty
+    if (!enabled) return;
     const interval = setInterval(poll, 3000);
     // Initial poll on mount
     poll();
     return () => clearInterval(interval);
-  }, [poll]);
+  }, [enabled, poll]);
 }

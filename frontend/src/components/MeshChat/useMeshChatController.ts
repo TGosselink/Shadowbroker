@@ -3915,7 +3915,7 @@ export function useMeshChatController({
       wormholeEnabled &&
       wormholeReadyState &&
       !selectedGateAccessReady) ||
-    ((activeTab === 'infonet' || activeTab === 'meshtastic') && anonymousPublicBlocked) ||
+    (activeTab === 'infonet' && anonymousPublicBlocked) ||
     (activeTab === 'dms' &&
       (dmView !== 'chat' ||
         !selectedContact ||

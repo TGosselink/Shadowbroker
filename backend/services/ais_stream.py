@@ -17,6 +17,18 @@ AIS_WS_URL = "wss://stream.aisstream.io/v0/stream"
 API_KEY = os.environ.get("AIS_API_KEY", "")
 
 
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def ais_stream_proxy_enabled() -> bool:
+    """Return whether the external Node AIS proxy may be started."""
+    setting = str(os.getenv("SHADOWBROKER_ENABLE_AIS_STREAM_PROXY", "")).strip().lower()
+    if setting:
+        return _env_truthy("SHADOWBROKER_ENABLE_AIS_STREAM_PROXY")
+    return True
+
+
 # AIS vessel type code classification
 # See: https://coast.noaa.gov/data/marinecadastre/ais/VesselTypeCodes2018.pdf
 def classify_vessel(ais_type: int, mmsi: int) -> str:
@@ -496,6 +508,12 @@ def _ais_stream_loop():
             logger.info("Starting Node.js AIS Stream Proxy...")
             proxy_env = os.environ.copy()
             proxy_env["AIS_API_KEY"] = API_KEY
+            popen_kwargs = {}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = (
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                )
             process = subprocess.Popen(
                 ["node", proxy_script],
                 stdin=subprocess.PIPE,
@@ -504,6 +522,7 @@ def _ais_stream_loop():
                 text=True,
                 bufsize=1,
                 env=proxy_env,
+                **popen_kwargs,
             )
             with _vessels_lock:
                 _proxy_process = process
@@ -646,6 +665,22 @@ def _run_ais_loop():
 def start_ais_stream():
     """Start the AIS WebSocket stream in a background thread."""
     global _ws_thread, _ws_running
+
+    # Always load cached vessel data first so the ships layer can paint even
+    # when live streaming is disabled or the upstream is unavailable.
+    _load_cache()
+
+    if not API_KEY:
+        logger.info("AIS_API_KEY not set — ship tracking disabled. Set AIS_API_KEY to enable.")
+        return
+
+    if not ais_stream_proxy_enabled():
+        logger.info(
+            "AIS live stream proxy disabled for this runtime; using cached AIS vessels. "
+            "Set SHADOWBROKER_ENABLE_AIS_STREAM_PROXY=1 to opt in."
+        )
+        return
+
     with _vessels_lock:
         if _ws_running:
             logger.info("AIS Stream already running")
@@ -655,9 +690,6 @@ def start_ais_stream():
     if existing_thread and existing_thread.is_alive():
         logger.info("AIS Stream already running")
         return
-
-    # Load cached vessel data from disk
-    _load_cache()
 
     _ws_thread = threading.Thread(target=_run_ais_loop, daemon=True, name="ais-stream")
     _ws_thread.start()

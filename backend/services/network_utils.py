@@ -1,5 +1,6 @@
 import logging
 import json
+import os
 import subprocess
 import shutil
 import time
@@ -20,7 +21,6 @@ _session.mount("http://", HTTPAdapter(max_retries=_retry, pool_maxsize=10))
 
 # Find bash for curl fallback — Git bash's curl has the TLS features
 # needed to pass CDN fingerprint checks (brotli, zstd, libpsl)
-_BASH_PATH = shutil.which("bash") or "bash"
 
 # Cache domains where requests fails — skip straight to curl for 5 minutes
 _domain_fail_cache: dict[str, float] = {}
@@ -37,6 +37,17 @@ _cb_lock = threading.Lock()
 
 class UpstreamCircuitBreakerError(OSError):
     """Raised when a domain recently failed hard and is temporarily skipped."""
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def external_curl_fallback_enabled() -> bool:
+    """Return whether the backend may spawn an external curl process."""
+    if os.name != "nt":
+        return True
+    return _env_truthy("SHADOWBROKER_ENABLE_WINDOWS_CURL_FALLBACK")
 
 
 class _DummyResponse:
@@ -98,11 +109,22 @@ def fetch_with_curl(url, method="GET", json_data=None, timeout=15, headers=None,
                 _circuit_breaker.pop(domain, None)
             return res
         except (requests.RequestException, ConnectionError, TimeoutError, OSError) as e:
-            logger.warning(f"Python requests failed for {url} ({e}), falling back to bash curl...")
+            fallback = "falling back to curl" if external_curl_fallback_enabled() else "skipping external curl"
+            logger.warning(f"Python requests failed for {url} ({e}), {fallback}...")
             with _cb_lock:
                 _domain_fail_cache[domain] = time.time()
 
     # Curl fallback — reached from both _skip_requests and requests-exception paths
+    if not external_curl_fallback_enabled():
+        logger.warning(
+            "External curl fallback disabled on Windows for %s; set "
+            "SHADOWBROKER_ENABLE_WINDOWS_CURL_FALLBACK=1 to opt in.",
+            domain,
+        )
+        with _cb_lock:
+            _circuit_breaker[domain] = time.time()
+        return _DummyResponse(500, "")
+
     _CURL_PATH = shutil.which("curl") or "curl"
     cmd = [_CURL_PATH, "-s", "-w", "\n%{http_code}"]
     if follow_redirects:
@@ -116,9 +138,16 @@ def fetch_with_curl(url, method="GET", json_data=None, timeout=15, headers=None,
 
     try:
         stdin_data = json.dumps(json_data) if (method == "POST" and json_data) else None
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
         res = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout + 5,
-            input=stdin_data, encoding="utf-8", errors="replace"
+            input=stdin_data, encoding="utf-8", errors="replace",
+            creationflags=creationflags,
         )
         if res.returncode == 0 and (res.stdout or "").strip():
             # Parse HTTP status code from -w output (last line)
@@ -130,12 +159,12 @@ def fetch_with_curl(url, method="GET", json_data=None, timeout=15, headers=None,
                     _circuit_breaker.pop(domain, None)  # Clear circuit breaker on success
             return _DummyResponse(http_code, body)
         else:
-            logger.error(f"bash curl fallback failed: exit={res.returncode} stderr={res.stderr[:200]}")
+            logger.error(f"curl fallback failed: exit={res.returncode} stderr={res.stderr[:200]}")
             with _cb_lock:
                 _circuit_breaker[domain] = time.time()
             return _DummyResponse(500, "")
     except (subprocess.SubprocessError, ConnectionError, TimeoutError, OSError) as curl_e:
-        logger.error(f"bash curl fallback exception: {curl_e}")
+        logger.error(f"curl fallback exception: {curl_e}")
         with _cb_lock:
             _circuit_breaker[domain] = time.time()
         return _DummyResponse(500, "")

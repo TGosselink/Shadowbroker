@@ -185,11 +185,29 @@ def _bbox_spans(s, w, n, e) -> tuple:
     return lat_span, max(0.0, lng_span)
 
 
-def _downsample_points(items: list, max_items: int) -> list:
-    if max_items <= 0 or len(items) <= max_items:
+def _cap_startup_items(items: list | None, max_items: int) -> list:
+    if not items:
+        return []
+    if len(items) <= max_items:
         return items
-    step = len(items) / float(max_items)
-    return [items[min(len(items) - 1, int(i * step))] for i in range(max_items)]
+    return items[:max_items]
+
+
+def _cap_fast_startup_payload(payload: dict) -> dict:
+    capped = dict(payload)
+    capped["commercial_flights"] = _cap_startup_items(capped.get("commercial_flights"), 800)
+    capped["private_flights"] = _cap_startup_items(capped.get("private_flights"), 300)
+    capped["private_jets"] = _cap_startup_items(capped.get("private_jets"), 150)
+    capped["ships"] = _cap_startup_items(capped.get("ships"), 1500)
+    capped["cctv"] = []
+    capped["sigint"] = _cap_startup_items(capped.get("sigint"), 500)
+    capped["trains"] = _cap_startup_items(capped.get("trains"), 100)
+    capped["startup_payload"] = True
+    return capped
+
+
+def _cap_fast_dashboard_payload(payload: dict) -> dict:
+    return payload
 
 
 def _world_and_continental_scale(has_bbox: bool, s, w, n, e) -> tuple:
@@ -326,6 +344,104 @@ async def live_data(request: Request):
     return get_latest_data()
 
 
+@router.get("/api/bootstrap/critical")
+@limiter.limit("180/minute")
+async def bootstrap_critical(request: Request):
+    """Cached first-paint payload for the dashboard.
+
+    This endpoint is intentionally memory-only: no upstream calls, no refresh,
+    and a bounded response. It exists so the map and threat feed can paint
+    before slower panels and background enrichers finish warming up.
+    """
+    etag = _current_etag(prefix="bootstrap|critical|")
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+    from services.fetchers._store import (
+        active_layers,
+        get_latest_data_subset_refs,
+        get_source_timestamps_snapshot,
+    )
+
+    d = get_latest_data_subset_refs(
+        "last_updated", "commercial_flights", "military_flights", "private_flights",
+        "private_jets", "tracked_flights", "ships", "uavs", "liveuamap", "gps_jamming",
+        "satellites", "satellite_source", "satellite_analysis", "sigint", "sigint_totals",
+        "trains", "news", "gdelt", "airports", "threat_level", "trending_markets",
+        "correlations", "fimi", "crowdthreat",
+    )
+    freshness = get_source_timestamps_snapshot()
+    ships_enabled = any(active_layers.get(key, True) for key in (
+        "ships_military", "ships_cargo", "ships_civilian", "ships_passenger", "ships_tracked_yachts"))
+    sigint_items = _filter_sigint_by_layers(d.get("sigint") or [], active_layers)
+    payload = {
+        "last_updated": d.get("last_updated"),
+        "commercial_flights": _cap_startup_items(
+            (d.get("commercial_flights") or []) if active_layers.get("flights", True) else [],
+            800,
+        ),
+        "military_flights": _cap_startup_items(
+            (d.get("military_flights") or []) if active_layers.get("military", True) else [],
+            300,
+        ),
+        "private_flights": _cap_startup_items(
+            (d.get("private_flights") or []) if active_layers.get("private", True) else [],
+            300,
+        ),
+        "private_jets": _cap_startup_items(
+            (d.get("private_jets") or []) if active_layers.get("jets", True) else [],
+            150,
+        ),
+        "tracked_flights": _cap_startup_items(
+            (d.get("tracked_flights") or []) if active_layers.get("tracked", True) else [],
+            250,
+        ),
+        "ships": _cap_startup_items((d.get("ships") or []) if ships_enabled else [], 1500),
+        "uavs": _cap_startup_items((d.get("uavs") or []) if active_layers.get("military", True) else [], 100),
+        "liveuamap": _cap_startup_items(
+            (d.get("liveuamap") or []) if active_layers.get("global_incidents", True) else [],
+            300,
+        ),
+        "gps_jamming": _cap_startup_items(
+            (d.get("gps_jamming") or []) if active_layers.get("gps_jamming", True) else [],
+            200,
+        ),
+        "satellites": _cap_startup_items(
+            (d.get("satellites") or []) if active_layers.get("satellites", True) else [],
+            250,
+        ),
+        "satellite_source": d.get("satellite_source", "none"),
+        "satellite_analysis": (d.get("satellite_analysis") or {}) if active_layers.get("satellites", True) else {},
+        "sigint": _cap_startup_items(
+            sigint_items if (active_layers.get("sigint_meshtastic", True) or active_layers.get("sigint_aprs", True)) else [],
+            500,
+        ),
+        "sigint_totals": _sigint_totals_for_items(sigint_items),
+        "trains": _cap_startup_items((d.get("trains") or []) if active_layers.get("trains", True) else [], 100),
+        "news": _cap_startup_items(d.get("news") or [], 30),
+        "gdelt": _cap_startup_items((d.get("gdelt") or []) if active_layers.get("global_incidents", True) else [], 300),
+        "airports": _cap_startup_items(d.get("airports") or [], 500),
+        "threat_level": d.get("threat_level"),
+        "trending_markets": _cap_startup_items(d.get("trending_markets") or [], 10),
+        "correlations": _cap_startup_items(
+            (d.get("correlations") or []) if active_layers.get("correlations", True) else [],
+            50,
+        ),
+        "fimi": d.get("fimi"),
+        "crowdthreat": _cap_startup_items(
+            (d.get("crowdthreat") or []) if active_layers.get("crowdthreat", True) else [],
+            150,
+        ),
+        "freshness": freshness,
+        "bootstrap_ready": True,
+        "bootstrap_payload": True,
+    }
+    return Response(
+        content=orjson.dumps(_sanitize_payload(payload), default=str, option=orjson.OPT_NON_STR_KEYS),
+        media_type="application/json",
+        headers={"ETag": etag, "Cache-Control": "no-cache"},
+    )
+
+
 @router.get("/api/live-data/fast")
 @limiter.limit("120/minute")
 async def live_data_fast(
@@ -334,8 +450,9 @@ async def live_data_fast(
     w: float = Query(None, description="West bound (ignored)", ge=-180, le=180),
     n: float = Query(None, description="North bound (ignored)", ge=-90, le=90),
     e: float = Query(None, description="East bound (ignored)", ge=-180, le=180),
+    initial: bool = Query(False, description="Return a capped startup payload for first paint"),
 ):
-    etag = _current_etag(prefix="fast|full|")
+    etag = _current_etag(prefix="fast|initial|" if initial else "fast|full|")
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
     from services.fetchers._store import (active_layers, get_latest_data_subset_refs, get_source_timestamps_snapshot)
@@ -371,6 +488,10 @@ async def live_data_fast(
         "trains": (d.get("trains") or []) if active_layers.get("trains", True) else [],
         "freshness": freshness,
     }
+    if initial:
+        payload = _cap_fast_startup_payload(payload)
+    else:
+        payload = _cap_fast_dashboard_payload(payload)
     return Response(content=orjson.dumps(_sanitize_payload(payload)), media_type="application/json",
         headers={"ETag": etag, "Cache-Control": "no-cache"})
 

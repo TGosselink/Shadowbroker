@@ -299,7 +299,8 @@ echo ===================================================
 echo   (Press Ctrl+C to stop)
 echo.
 
-call npm run dev
+start "ShadowBroker Runtime" powershell.exe -NoProfile -ExecutionPolicy Bypass -NoExit -File "%ROOT%\scripts\run-windows-runtime.ps1" -Root "%ROOT%"
+exit /b 0
 
 echo.
 echo ===================================================

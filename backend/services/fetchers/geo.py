@@ -15,6 +15,24 @@ from services.fetchers.retry import with_retry
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name: str) -> str:
+    return str(os.getenv(name, "")).strip().lower()
+
+
+def liveuamap_scraper_enabled() -> bool:
+    """Return whether the Playwright-based LiveUAMap scraper should run.
+
+    It is useful enrichment, but it starts a browser/Node driver and must not be
+    allowed to destabilize Windows local startup.
+    """
+    setting = _env_flag("SHADOWBROKER_ENABLE_LIVEUAMAP_SCRAPER")
+    if setting in {"1", "true", "yes", "on"}:
+        return True
+    if setting in {"0", "false", "no", "off"}:
+        return False
+    return os.name != "nt"
+
+
 # ---------------------------------------------------------------------------
 # Ships (AIS + Carriers)
 # ---------------------------------------------------------------------------
@@ -190,6 +208,12 @@ def update_liveuamap():
     from services.fetchers._store import is_any_active
 
     if not is_any_active("global_incidents"):
+        return
+    if not liveuamap_scraper_enabled():
+        logger.info(
+            "Liveuamap scraper disabled for this runtime; set "
+            "SHADOWBROKER_ENABLE_LIVEUAMAP_SCRAPER=1 to opt in."
+        )
         return
     logger.info("Running scheduled Liveuamap scraper...")
     try:
