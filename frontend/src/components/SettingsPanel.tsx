@@ -120,6 +120,9 @@ interface EnvMeta {
   env_path_writable: boolean;
   env_example_path: string;
   env_example_path_exists: boolean;
+  operator_keys_env_path?: string;
+  operator_keys_env_path_exists?: boolean;
+  operator_keys_env_path_writable?: boolean;
 }
 
 const WEIGHT_LABELS: Record<number, string> = {
@@ -493,10 +496,12 @@ const SettingsPanel = React.memo(function SettingsPanel({
   }, [adminKey, refreshAdminSession]);
 
   // --- API Keys state ---
-  // API keys are intentionally NOT editable in-app. The panel is read-only and
-  // tells the user where the .env file lives so they can edit it directly.
-  // This keeps secrets off the wire and out of the browser process.
+  // API keys are write-only in-app. Values are sent once to the local backend,
+  // stored server-side, and never returned to the browser.
   const [apis, setApis] = useState<ApiEntry[]>([]);
+  const [apiKeyInputs, setApiKeyInputs] = useState<Record<string, string>>({});
+  const [apiKeySaving, setApiKeySaving] = useState<string | null>(null);
+  const [apiKeyMsg, setApiKeyMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
     new Set(['Aviation', 'Maritime']),
   );
@@ -535,13 +540,49 @@ const SettingsPanel = React.memo(function SettingsPanel({
 
   const fetchKeys = useCallback(async () => {
     try {
-      setApis(await controlPlaneJson<ApiEntry[]>('/api/settings/api-keys'));
+      setApis(await controlPlaneJson<ApiEntry[]>('/api/settings/api-keys', {
+        requireAdminSession: false,
+      }));
       return true;
     } catch (e) {
       await handleProtectedSettingsError(e);
       return false;
     }
   }, [handleProtectedSettingsError]);
+
+  const saveApiKey = useCallback(
+    async (envKey: string | null) => {
+      if (!envKey) return;
+      const value = String(apiKeyInputs[envKey] || '').trim();
+      if (!value) {
+        setApiKeyMsg({ type: 'err', text: `Enter a value for ${envKey}.` });
+        return;
+      }
+      setApiKeySaving(envKey);
+      setApiKeyMsg(null);
+      try {
+        const result = await controlPlaneJson<{
+          keys?: ApiEntry[];
+          env?: EnvMeta;
+        }>('/api/settings/api-keys', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [envKey]: value }),
+          requireAdminSession: false,
+        });
+        if (result.keys) setApis(result.keys);
+        if (result.env) setEnvMeta(result.env);
+        setApiKeyInputs((prev) => ({ ...prev, [envKey]: '' }));
+        setApiKeyMsg({ type: 'ok', text: `${envKey} saved locally. Restart or refresh feeds to use it.` });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : 'Could not save API key';
+        setApiKeyMsg({ type: 'err', text: message });
+      } finally {
+        setApiKeySaving(null);
+      }
+    },
+    [apiKeyInputs],
+  );
 
   const fetchEnvMeta = useCallback(async () => {
     try {
@@ -663,10 +704,10 @@ const SettingsPanel = React.memo(function SettingsPanel({
       }
       void (async () => {
         const ready = await refreshAdminSession();
+        await fetchKeys();
         if (ready) {
-          await Promise.all([fetchKeys(), fetchFeeds()]);
+          await fetchFeeds();
         } else {
-          setApis([]);
           setFeeds([]);
           setFeedsDirty(false);
         }
@@ -713,12 +754,13 @@ const SettingsPanel = React.memo(function SettingsPanel({
   }, [onClose, wormholeEnabled, wormholeSaving, wormholeStatus]);
 
   useEffect(() => {
-    if (!isOpen || !adminSessionReady) return;
+    if (!isOpen) return;
     if (activeTab === 'api-keys') {
       void fetchKeys();
       void fetchEnvMeta();
       return;
     }
+    if (!adminSessionReady) return;
     if (activeTab === 'news-feeds') {
       void fetchFeeds();
     }
@@ -2166,18 +2208,21 @@ const SettingsPanel = React.memo(function SettingsPanel({
                   <div className="flex items-start gap-2">
                     <Shield size={12} className="text-cyan-500 mt-0.5 flex-shrink-0" />
                     <p className="text-sm text-[var(--text-secondary)] font-mono leading-relaxed">
-                      API keys are stored locally in the backend{' '}
-                      <span className="text-cyan-400">.env</span> file. Keys marked with{' '}
-                      <Key size={8} className="inline text-yellow-500" /> are required for full
-                      functionality. Public APIs need no key.
+                      API keys are saved locally by this backend. Values are write-only: the app
+                      stores the key and shows CONFIGURED, but it never reads the secret back into
+                      the browser. Keys marked with{' '}
+                      <Key size={8} className="inline text-yellow-500" /> unlock the richest live
+                      aircraft and vessel feeds.
                     </p>
                   </div>
                   {envMeta && (
                     <div className="pl-5 text-[12px] font-mono text-[var(--text-muted)] leading-relaxed space-y-0.5">
                       <div>
-                        <span className="text-cyan-500/70">.env path:</span>{' '}
-                        <span className="text-cyan-300 break-all select-all">{envMeta.env_path}</span>{' '}
-                        {envMeta.env_path_exists ? (
+                        <span className="text-cyan-500/70">local key store:</span>{' '}
+                        <span className="text-cyan-300 break-all select-all">
+                          {envMeta.operator_keys_env_path || envMeta.env_path}
+                        </span>{' '}
+                        {envMeta.operator_keys_env_path_exists || envMeta.env_path_exists ? (
                           <span className="text-green-400/80">[exists]</span>
                         ) : (
                           <span className="text-amber-400/80">[will be created on first save]</span>
@@ -2197,6 +2242,15 @@ const SettingsPanel = React.memo(function SettingsPanel({
                           </span>
                         </div>
                       )}
+                    </div>
+                  )}
+                  {apiKeyMsg && (
+                    <div
+                      className={`pl-5 text-sm font-mono ${
+                        apiKeyMsg.type === 'ok' ? 'text-green-300' : 'text-red-300'
+                      }`}
+                    >
+                      {apiKeyMsg.text}
                     </div>
                   )}
                 </div>
@@ -2288,9 +2342,9 @@ const SettingsPanel = React.memo(function SettingsPanel({
                                     {api.description}
                                   </p>
                                   {api.has_key && (
-                                    <div className="mt-2 flex items-center gap-2 text-[12px] font-mono">
+                                    <div className="mt-2 space-y-2 text-[12px] font-mono">
                                       {api.is_set ? (
-                                        <>
+                                        <div className="flex items-center gap-2">
                                           <span className="px-2 py-0.5 border border-green-500/40 bg-green-950/20 text-green-300 tracking-wider">
                                             CONFIGURED
                                           </span>
@@ -2299,23 +2353,53 @@ const SettingsPanel = React.memo(function SettingsPanel({
                                             <span className="text-cyan-300 select-all break-all">
                                               {api.env_key}
                                             </span>{' '}
-                                            in the .env file (path shown above) and restart the backend.
+                                            Enter a replacement below if you need to rotate it.
                                           </span>
-                                        </>
+                                        </div>
                                       ) : (
-                                        <>
+                                        <div className="flex items-center gap-2">
                                           <span className="px-2 py-0.5 border border-amber-500/40 bg-amber-950/20 text-amber-300 tracking-wider">
                                             NOT CONFIGURED
                                           </span>
                                           <span className="text-[var(--text-muted)]">
-                                            add{' '}
-                                            <span className="text-amber-200 select-all break-all">
-                                              {api.env_key}=YOUR_VALUE
-                                            </span>{' '}
-                                            to the .env file (path shown above) and restart the backend.
+                                            Save {api.env_key} here to enable this source.
                                           </span>
-                                        </>
+                                        </div>
                                       )}
+                                      <div className="flex items-center gap-2">
+                                        <input
+                                          type="password"
+                                          value={api.env_key ? apiKeyInputs[api.env_key] || '' : ''}
+                                          onChange={(event) => {
+                                            if (!api.env_key) return;
+                                            setApiKeyInputs((prev) => ({
+                                              ...prev,
+                                              [api.env_key as string]: event.target.value,
+                                            }));
+                                          }}
+                                          placeholder={
+                                            api.is_set
+                                              ? 'Enter replacement key...'
+                                              : `Enter ${api.env_key}...`
+                                          }
+                                          className="min-w-0 flex-1 bg-[var(--bg-primary)] border border-[var(--border-primary)] px-2 py-1.5 text-sm text-[var(--text-primary)] outline-none focus:border-cyan-500/70 placeholder:text-[var(--text-muted)]/50"
+                                          autoComplete="off"
+                                        />
+                                        <button
+                                          onClick={() => void saveApiKey(api.env_key)}
+                                          disabled={
+                                            !api.env_key ||
+                                            apiKeySaving === api.env_key ||
+                                            !String(
+                                              api.env_key ? apiKeyInputs[api.env_key] || '' : '',
+                                            ).trim()
+                                          }
+                                          className="h-8 px-3 border border-cyan-500/40 bg-cyan-950/20 text-cyan-300 hover:bg-cyan-500/15 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 tracking-widest"
+                                        >
+                                          <Save size={12} />
+                                          {apiKeySaving === api.env_key ? 'SAVING' : 'SAVE'}
+                                        </button>
+                                      </div>
                                     </div>
                                   )}
                                 </div>

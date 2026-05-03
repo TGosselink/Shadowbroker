@@ -28,11 +28,32 @@ class TimeMachineToggle(BaseModel):
     enabled: bool
 
 
-@router.get("/api/settings/api-keys", dependencies=[Depends(require_admin)])
+@router.get("/api/settings/api-keys", dependencies=[Depends(require_local_operator)])
 @limiter.limit("30/minute")
 async def api_get_keys(request: Request):
     from services.api_settings import get_api_keys
     return get_api_keys()
+
+
+@router.put("/api/settings/api-keys", dependencies=[Depends(require_local_operator)])
+@limiter.limit("10/minute")
+async def api_save_keys(request: Request):
+    from services.api_settings import save_api_keys
+    body = await request.json()
+    if not isinstance(body, dict):
+        return Response(
+            content=json_mod.dumps({"ok": False, "detail": "Expected a JSON object."}),
+            status_code=400,
+            media_type="application/json",
+        )
+    result = save_api_keys({str(k): str(v) for k, v in body.items()})
+    if result.get("ok"):
+        return result
+    return Response(
+        content=json_mod.dumps(result),
+        status_code=400,
+        media_type="application/json",
+    )
 
 
 @router.get("/api/settings/api-keys/meta")

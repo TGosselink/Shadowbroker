@@ -19,7 +19,7 @@ const API_GUIDES = [
       'Create a free account at opensky-network.org',
       'Go to Dashboard → OAuth → Create Client',
       'Copy your Client ID and Client Secret',
-      'Set OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET in your .env file, then restart ShadowBroker',
+      'Paste both into Quick Local Setup above or Settings → API Keys',
     ],
     url: 'https://opensky-network.org/index.php?option=com_users&view=registration',
     color: 'cyan',
@@ -33,7 +33,7 @@ const API_GUIDES = [
       'Register at aisstream.io',
       'Navigate to your API Keys page',
       'Generate a new API key',
-      'Set AIS_API_KEY in your .env file, then restart ShadowBroker',
+      'Paste it into Quick Local Setup above or Settings → API Keys',
     ],
     url: 'https://aisstream.io/authenticate',
     color: 'blue',
@@ -61,6 +61,13 @@ const OnboardingModal = React.memo(function OnboardingModal({
   onOpenSettings,
 }: OnboardingModalProps) {
   const [step, setStep] = useState(0);
+  const [setupKeys, setSetupKeys] = useState({
+    OPENSKY_CLIENT_ID: '',
+    OPENSKY_CLIENT_SECRET: '',
+    AIS_API_KEY: '',
+  });
+  const [setupSaving, setSetupSaving] = useState(false);
+  const [setupMsg, setSetupMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   const handleDismiss = () => {
     localStorage.setItem(STORAGE_KEY, 'true');
@@ -73,6 +80,38 @@ const OnboardingModal = React.memo(function OnboardingModal({
     localStorage.setItem(LEGACY_STORAGE_KEY, 'true');
     onClose();
     onOpenSettings();
+  };
+
+  const saveSetupKeys = async () => {
+    const payload = Object.fromEntries(
+      Object.entries(setupKeys).filter(([, value]) => value.trim()),
+    );
+    if (!Object.keys(payload).length) {
+      setSetupMsg({ type: 'err', text: 'Enter at least one API key first.' });
+      return;
+    }
+    setSetupSaving(true);
+    setSetupMsg(null);
+    try {
+      const res = await fetch('/api/settings/api-keys', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.detail || 'Could not save API keys.');
+      }
+      setSetupKeys({ OPENSKY_CLIENT_ID: '', OPENSKY_CLIENT_SECRET: '', AIS_API_KEY: '' });
+      setSetupMsg({ type: 'ok', text: 'Keys saved locally. Restart or refresh feeds to use them.' });
+    } catch (error) {
+      setSetupMsg({
+        type: 'err',
+        text: error instanceof Error ? error.message : 'Could not save API keys.',
+      });
+    } finally {
+      setSetupSaving(false);
+    }
   };
 
   return (
@@ -218,12 +257,56 @@ const OnboardingModal = React.memo(function OnboardingModal({
                       </p>
                       <p className="text-sm text-[var(--text-secondary)] font-mono leading-relaxed">
                         OpenSky Network and AIS Stream are the free keys that make ShadowBroker
-                        useful immediately: live aircraft and vessel tracking. For Docker installs,
-                        create or edit the .env file next to docker-compose.yml, then run docker
-                        compose up -d. For local source installs, edit backend/.env and restart.
+                        useful immediately: live aircraft and vessel tracking. Paste them below or
+                        use Settings later; secrets stay on the local backend.
                       </p>
                     </div>
                   </div>
+                </div>
+
+                <div className="border border-cyan-900/40 bg-cyan-950/10 p-4 space-y-3">
+                  <div>
+                    <p className="text-[11px] text-cyan-300 font-mono font-bold tracking-widest">
+                      QUICK LOCAL SETUP
+                    </p>
+                    <p className="text-sm text-[var(--text-secondary)] font-mono leading-relaxed mt-1">
+                      Paste keys here once. ShadowBroker stores them server-side only and never
+                      displays the secret back in the browser.
+                    </p>
+                  </div>
+                  {[
+                    ['OPENSKY_CLIENT_ID', 'OpenSky Client ID'],
+                    ['OPENSKY_CLIENT_SECRET', 'OpenSky Client Secret'],
+                    ['AIS_API_KEY', 'AIS Stream API Key'],
+                  ].map(([key, label]) => (
+                    <input
+                      key={key}
+                      type="password"
+                      value={setupKeys[key as keyof typeof setupKeys]}
+                      onChange={(event) =>
+                        setSetupKeys((prev) => ({ ...prev, [key]: event.target.value }))
+                      }
+                      placeholder={label}
+                      className="w-full bg-[var(--bg-primary)] border border-[var(--border-primary)] px-3 py-2 text-sm text-[var(--text-primary)] font-mono outline-none focus:border-cyan-500/70 placeholder:text-[var(--text-muted)]/60"
+                      autoComplete="off"
+                    />
+                  ))}
+                  {setupMsg && (
+                    <p
+                      className={`text-sm font-mono ${
+                        setupMsg.type === 'ok' ? 'text-green-300' : 'text-red-300'
+                      }`}
+                    >
+                      {setupMsg.text}
+                    </p>
+                  )}
+                  <button
+                    onClick={() => void saveSetupKeys()}
+                    disabled={setupSaving}
+                    className="w-full py-2 bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-[11px] font-mono tracking-widest"
+                  >
+                    {setupSaving ? 'SAVING...' : 'SAVE KEYS LOCALLY'}
+                  </button>
                 </div>
 
                 {API_GUIDES.map((api) => (
