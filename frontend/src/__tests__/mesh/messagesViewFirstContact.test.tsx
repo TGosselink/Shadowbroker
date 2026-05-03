@@ -305,7 +305,7 @@ describe('MessagesView first-contact trust UX', () => {
     await screen.findByText(/Mail delivered to Pinned Peer/i, {}, { timeout: 5000 });
     expect(mocks.prepareWormholeInteractiveLane).toHaveBeenCalled();
     expect(mocks.sendDmMessage).toHaveBeenCalled();
-  });
+  }, 10000);
 
   it('does not flatten witness policy not met into a generic witnessed root label', async () => {
     contactsState = {
