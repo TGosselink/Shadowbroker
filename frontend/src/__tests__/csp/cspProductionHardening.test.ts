@@ -1,8 +1,9 @@
 /**
- * Phase 5F-B: Production script-src unsafe-inline removal tests.
+ * Phase 5F-B: Production script-src nonce hardening tests.
  *
  * Validates:
- * 1. Production CSP omits script-src 'unsafe-inline'
+ * 1. Production CSP preserves nonce-based script execution with a compatibility
+ *    inline fallback required by the Next.js production runtime
  * 2. Dev CSP retains 'unsafe-inline' and 'unsafe-eval'
  * 3. Unchanged directives (style-src, font-src, worker-src, etc.) intact
  * 4. API/static route exclusions remain intact
@@ -41,7 +42,7 @@ function matcherExcludes(path: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Production CSP omits script-src 'unsafe-inline'
+// 1. Production CSP keeps nonce hardening without blocking Next hydration
 // ---------------------------------------------------------------------------
 
 describe('production script-src hardening', () => {
@@ -52,9 +53,9 @@ describe('production script-src hardening', () => {
     vi.unstubAllEnvs();
   });
 
-  it('production script-src does NOT contain unsafe-inline', () => {
+  it('production script-src contains unsafe-inline compatibility fallback', () => {
     const scriptSrc = getDirective('script-src');
-    expect(scriptSrc).not.toContain("'unsafe-inline'");
+    expect(scriptSrc).toContain("'unsafe-inline'");
   });
 
   it('production script-src does NOT contain unsafe-eval', () => {
@@ -213,10 +214,12 @@ describe('per-request environment evaluation', () => {
   it('switching NODE_ENV between calls changes script-src', () => {
     vi.stubEnv('NODE_ENV', 'production');
     const prodScriptSrc = getDirective('script-src');
-    expect(prodScriptSrc).not.toContain("'unsafe-inline'");
+    expect(prodScriptSrc).toContain("'unsafe-inline'");
+    expect(prodScriptSrc).not.toContain("'unsafe-eval'");
 
     vi.stubEnv('NODE_ENV', 'development');
     const devScriptSrc = getDirective('script-src');
     expect(devScriptSrc).toContain("'unsafe-inline'");
+    expect(devScriptSrc).toContain("'unsafe-eval'");
   });
 });
