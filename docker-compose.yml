@@ -13,10 +13,10 @@ services:
     ports:
       - "${BIND:-127.0.0.1}:8000:8000"
     environment:
-      - AIS_API_KEY=${AIS_API_KEY}
-      - OPENSKY_CLIENT_ID=${OPENSKY_CLIENT_ID}
-      - OPENSKY_CLIENT_SECRET=${OPENSKY_CLIENT_SECRET}
-      - LTA_ACCOUNT_KEY=${LTA_ACCOUNT_KEY}
+      - AIS_API_KEY=${AIS_API_KEY:-}
+      - OPENSKY_CLIENT_ID=${OPENSKY_CLIENT_ID:-}
+      - OPENSKY_CLIENT_SECRET=${OPENSKY_CLIENT_SECRET:-}
+      - LTA_ACCOUNT_KEY=${LTA_ACCOUNT_KEY:-}
       - ADMIN_KEY=${ADMIN_KEY:-}
       - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
       # Override allowed CORS origins (comma-separated). Auto-detects LAN IPs if empty.
@@ -26,7 +26,7 @@ services:
       # Operator-trusted sync/push peers. Leave empty unless you control the peer secret on both sides.
       - MESH_RELAY_PEERS=${MESH_RELAY_PEERS:-}
       # Shared transport auth for operator peer push. Must be set to a unique secret per deployment.
-      - MESH_PEER_PUSH_SECRET=${MESH_PEER_PUSH_SECRET}
+      - MESH_PEER_PUSH_SECRET=${MESH_PEER_PUSH_SECRET:-}
     volumes:
       - backend_data:/app/data
     restart: unless-stopped
@@ -56,7 +56,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
       interval: 30s
       timeout: 10s
       retries: 3

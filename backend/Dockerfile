@@ -49,6 +49,13 @@ RUN cd /workspace/backend && uv sync --frozen --no-dev \
 # Copy backend source code
 COPY backend/ .
 
+# Preserve safe static data outside /app/data. The compose named volume mounted
+# at /app/data hides image-baked files on first run, so the entrypoint seeds
+# missing static JSON into fresh volumes before the backend starts.
+RUN mkdir -p /app/image-data \
+    && if [ -d /app/data ]; then cp -a /app/data/. /app/image-data/; fi \
+    && chmod +x /app/docker-entrypoint.sh
+
 # Install Node.js dependencies (ws module for AIS WebSocket proxy)
 COPY backend/package*.json ./
 RUN npm ci --omit=dev
@@ -75,4 +82,5 @@ USER backenduser
 EXPOSE 8000
 
 # Start FastAPI server
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "120"]
