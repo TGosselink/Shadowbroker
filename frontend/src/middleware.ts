@@ -14,7 +14,7 @@ function buildCsp(nonce: string): string {
     "default-src 'self'",
     isDev
       ? `script-src 'self' 'unsafe-inline' 'unsafe-eval' 'nonce-${nonce}' blob:`
-      : `script-src 'self' 'nonce-${nonce}' blob:`,
+      : `script-src 'self' 'unsafe-inline' 'nonce-${nonce}' blob:`,
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "img-src 'self' data: blob: https:",
     isDev
