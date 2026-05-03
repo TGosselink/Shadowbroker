@@ -70,7 +70,7 @@ docker compose up -d
 
 Open `http://localhost:3000` to view the dashboard! *(Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine)*
 
-> **Podman users:** Replace `docker compose` with `podman compose`, or use the `compose.sh` wrapper which auto-detects your engine. Force Podman with `./compose.sh --engine podman up -d`.
+> **Podman users:** Podman works, but `podman compose` is a wrapper and still needs a Compose provider installed. On Windows/WSL, if you see `looking up compose provider failed`, install `podman-compose` and run `podman-compose pull` followed by `podman-compose up -d` from inside the cloned `Shadowbroker` folder. On Linux/macOS/WSL shells you can also use `./compose.sh --engine podman pull` and `./compose.sh --engine podman up -d`.
 
 ---
 
@@ -93,6 +93,8 @@ That's it. `pull` grabs the latest images, `up -d` restarts the containers.
 > docker compose pull
 > docker compose up -d
 > ```
+>
+> Podman users should run the equivalent provider command, for example `podman-compose pull` and `podman-compose up -d`, or use `./compose.sh --engine podman pull` and `./compose.sh --engine podman up -d` from a bash-compatible shell.
 
 ### ⚠️ **Stuck on the old version?**
 
@@ -566,19 +568,40 @@ Open `http://localhost:3000` to view the dashboard.
 >
 > ```bash
 > # Linux / macOS
-> BACKEND_URL=http://myserver.com:9096 docker-compose up -d
+> BACKEND_URL=http://myserver.com:9096 docker compose up -d
 >
 > # Podman (via compose.sh wrapper)
 > BACKEND_URL=http://192.168.1.50:9096 ./compose.sh up -d
 >
 > # Windows (PowerShell)
-> $env:BACKEND_URL="http://myserver.com:9096"; docker-compose up -d
+> $env:BACKEND_URL="http://myserver.com:9096"; docker compose up -d
 >
 > # Or add to a .env file next to docker-compose.yml:
 > # BACKEND_URL=http://myserver.com:9096
 > ```
 
-**Podman users:** Replace `docker compose` with `podman compose`, or use the `compose.sh` wrapper which auto-detects your engine.
+**Podman users:** Do not pass the GitHub URL to `podman compose pull`; clone the repo first, `cd Shadowbroker`, then run compose from that folder. `podman compose` also requires a Compose provider. If Podman reports `looking up compose provider failed`, install one:
+
+```bash
+# Linux / macOS / WSL
+python3 -m pip install --user podman-compose
+podman-compose pull
+podman-compose up -d
+```
+
+```powershell
+# Windows PowerShell
+py -m pip install --user podman-compose
+podman-compose pull
+podman-compose up -d
+```
+
+If you are in a bash-compatible shell, the included wrapper can auto-detect Docker or Podman:
+
+```bash
+./compose.sh --engine podman pull
+./compose.sh --engine podman up -d
+```
 
 ---
 
