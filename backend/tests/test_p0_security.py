@@ -86,6 +86,18 @@ class TestRequireLocalOperator:
     def test_rfc1918_172_blocked_without_key(self):
         assert self._call_with_host("172.16.0.5") == 403
 
+    def test_docker_bridge_blocked_without_compose_opt_in(self):
+        with patch.dict("os.environ", {"SHADOWBROKER_TRUST_DOCKER_BRIDGE_LOCAL_OPERATOR": ""}):
+            assert self._call_with_host("172.18.0.3") == 403
+
+    def test_docker_bridge_passes_with_compose_opt_in(self):
+        with patch.dict("os.environ", {"SHADOWBROKER_TRUST_DOCKER_BRIDGE_LOCAL_OPERATOR": "1"}):
+            assert self._call_with_host("172.18.0.3") == 200
+
+    def test_lan_ip_still_blocked_with_compose_opt_in(self):
+        with patch.dict("os.environ", {"SHADOWBROKER_TRUST_DOCKER_BRIDGE_LOCAL_OPERATOR": "1"}):
+            assert self._call_with_host("192.168.1.100") == 403
+
     def test_rfc1918_192168_blocked_without_key(self):
         assert self._call_with_host("192.168.1.100") == 403
 

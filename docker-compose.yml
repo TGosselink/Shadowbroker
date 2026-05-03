@@ -27,6 +27,9 @@ services:
       - MESH_RELAY_PEERS=${MESH_RELAY_PEERS:-}
       # Shared transport auth for operator peer push. Must be set to a unique secret per deployment.
       - MESH_PEER_PUSH_SECRET=${MESH_PEER_PUSH_SECRET:-}
+      # The bundled Docker UI talks to the backend across Docker's private bridge.
+      # Treat that bridge as local operator access while ports remain bound to 127.0.0.1 by default.
+      - SHADOWBROKER_TRUST_DOCKER_BRIDGE_LOCAL_OPERATOR=${SHADOWBROKER_TRUST_DOCKER_BRIDGE_LOCAL_OPERATOR:-1}
     volumes:
       - backend_data:/app/data
     restart: unless-stopped

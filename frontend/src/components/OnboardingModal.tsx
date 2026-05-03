@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, ExternalLink, Key, Shield, Radar, Globe, Satellite, Ship, Radio } from 'lucide-react';
 
-const CURRENT_ONBOARDING_VERSION = '0.9.7';
+const CURRENT_ONBOARDING_VERSION = '0.9.7-docker-keys-1';
 const STORAGE_KEY = `shadowbroker_onboarding_complete_v${CURRENT_ONBOARDING_VERSION}`;
 const LEGACY_STORAGE_KEY = 'shadowbroker_onboarding_complete';
 
@@ -19,7 +19,7 @@ const API_GUIDES = [
       'Create a free account at opensky-network.org',
       'Go to Dashboard → OAuth → Create Client',
       'Copy your Client ID and Client Secret',
-      'Paste both into Settings → Aviation',
+      'Set OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET in your .env file, then restart ShadowBroker',
     ],
     url: 'https://opensky-network.org/index.php?option=com_users&view=registration',
     color: 'cyan',
@@ -33,7 +33,7 @@ const API_GUIDES = [
       'Register at aisstream.io',
       'Navigate to your API Keys page',
       'Generate a new API key',
-      'Paste it into Settings → Maritime',
+      'Set AIS_API_KEY in your .env file, then restart ShadowBroker',
     ],
     url: 'https://aisstream.io/authenticate',
     color: 'blue',
@@ -218,8 +218,9 @@ const OnboardingModal = React.memo(function OnboardingModal({
                       </p>
                       <p className="text-sm text-[var(--text-secondary)] font-mono leading-relaxed">
                         OpenSky Network and AIS Stream are the free keys that make ShadowBroker
-                        useful immediately: live aircraft and vessel tracking. Add these first;
-                        trust modes and the no-key sources can come next.
+                        useful immediately: live aircraft and vessel tracking. For Docker installs,
+                        create or edit the .env file next to docker-compose.yml, then run docker
+                        compose up -d. For local source installs, edit backend/.env and restart.
                       </p>
                     </div>
                   </div>

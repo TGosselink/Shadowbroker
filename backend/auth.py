@@ -13,6 +13,7 @@ import hmac
 import asyncio
 import hmac as _hmac_mod
 import hashlib as _hashlib_mod
+import ipaddress
 import json as json_mod
 import logging
 import time
@@ -235,10 +236,36 @@ def _is_local_or_docker(host: str) -> bool:
     return host in {"127.0.0.1", "::1", "localhost"}
 
 
+def _docker_bridge_local_operator_enabled() -> bool:
+    return str(os.environ.get("SHADOWBROKER_TRUST_DOCKER_BRIDGE_LOCAL_OPERATOR", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _is_docker_bridge_host(host: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    # Docker Desktop and the default compose bridge normally sit inside
+    # 172.16.0.0/12. Keep this narrower than "any private IP" so a user who
+    # intentionally binds the backend to LAN does not silently trust LAN clients.
+    return ip in ipaddress.ip_network("172.16.0.0/12")
+
+
+def _is_trusted_local_runtime_host(host: str) -> bool:
+    if _is_local_or_docker(host):
+        return True
+    return _docker_bridge_local_operator_enabled() and _is_docker_bridge_host(host)
+
+
 def require_local_operator(request: Request):
     """Allow local tooling on loopback / Docker internal network, or a valid admin key."""
     host = (request.client.host or "").lower() if request.client else ""
-    if _is_local_or_docker(host) or (_debug_mode_enabled() and host == "test"):
+    if _is_trusted_local_runtime_host(host) or (_debug_mode_enabled() and host == "test"):
         return
     admin_key = _current_admin_key()
     presented = str(request.headers.get("X-Admin-Key", "") or "").strip()
@@ -362,8 +389,8 @@ async def require_openclaw_or_local(request: Request):
     """
     host = (request.client.host or "").lower() if request.client else ""
 
-    # 1. Local loopback — always allowed
-    if _is_local_or_docker(host) or (_debug_mode_enabled() and host == "test"):
+    # 1. Local runtime path — loopback, plus bundled Docker bridge when compose opts in
+    if _is_trusted_local_runtime_host(host) or (_debug_mode_enabled() and host == "test"):
         return
 
     # 2. Admin key — full trust
