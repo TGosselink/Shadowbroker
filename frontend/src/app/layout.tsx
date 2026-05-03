@@ -8,8 +8,6 @@ export const metadata: Metadata = {
   description: 'Advanced Geopolitical Risk Dashboard',
 };
 
-export const dynamic = 'force-dynamic';
-
 export default function RootLayout({
   children,
 }: Readonly<{
