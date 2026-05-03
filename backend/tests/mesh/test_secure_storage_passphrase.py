@@ -2,7 +2,7 @@
 
 Tests prove:
 - Docker no longer auto-allows raw fallback
-- Non-Windows with no secure secret and no raw opt-in fails closed
+- Non-Windows with no secure secret generates a local passphrase file
 - Non-Windows with MESH_SECURE_STORAGE_SECRET works (passphrase provider)
 - Passphrase-protected envelopes round-trip correctly (master + domain)
 - Raw-to-passphrase migration works when secret is supplied
@@ -64,10 +64,10 @@ class TestDockerNoAutoRawFallback:
         assert mesh_secure_storage._raw_fallback_allowed() is True
 
 
-class TestFailClosedWithoutSecret:
-    """Non-Windows with no secret and no raw opt-in must fail closed."""
+class TestGeneratedLocalSecretWithoutOperatorSecret:
+    """Non-Windows with no supplied secret generates a local passphrase file."""
 
-    def test_master_key_creation_fails_closed(self, tmp_path, monkeypatch):
+    def test_master_key_creation_uses_generated_local_secret(self, tmp_path, monkeypatch):
         from services.mesh import mesh_secure_storage
         from services import config as config_mod
 
@@ -76,6 +76,7 @@ class TestFailClosedWithoutSecret:
         monkeypatch.setattr(mesh_secure_storage, "_is_windows", lambda: False)
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         monkeypatch.delenv("MESH_SECURE_STORAGE_SECRET", raising=False)
+        monkeypatch.delenv("MESH_SECURE_STORAGE_SECRET_FILE", raising=False)
         monkeypatch.setattr(
             config_mod,
             "get_settings",
@@ -86,10 +87,14 @@ class TestFailClosedWithoutSecret:
         )
         _reset(mesh_secure_storage)
 
-        with pytest.raises(mesh_secure_storage.SecureStorageError, match="MESH_SECURE_STORAGE_SECRET"):
-            mesh_secure_storage._load_master_key()
+        key = mesh_secure_storage._load_master_key()
+        assert len(key) == 32
+        assert (tmp_path / "secure_storage_secret.key").exists()
+        envelope = json.loads((tmp_path / "master.key").read_text(encoding="utf-8"))
+        assert envelope["provider"] == "passphrase"
+        assert "key" not in envelope
 
-    def test_domain_key_creation_fails_closed(self, tmp_path, monkeypatch):
+    def test_domain_key_creation_uses_generated_local_secret(self, tmp_path, monkeypatch):
         from services.mesh import mesh_secure_storage
         from services import config as config_mod
 
@@ -98,6 +103,7 @@ class TestFailClosedWithoutSecret:
         monkeypatch.setattr(mesh_secure_storage, "_is_windows", lambda: False)
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         monkeypatch.delenv("MESH_SECURE_STORAGE_SECRET", raising=False)
+        monkeypatch.delenv("MESH_SECURE_STORAGE_SECRET_FILE", raising=False)
         monkeypatch.setattr(
             config_mod,
             "get_settings",
@@ -108,8 +114,12 @@ class TestFailClosedWithoutSecret:
         )
         _reset(mesh_secure_storage)
 
-        with pytest.raises(mesh_secure_storage.SecureStorageError, match="MESH_SECURE_STORAGE_SECRET"):
-            mesh_secure_storage._load_domain_key("test_domain", base_dir=tmp_path)
+        key = mesh_secure_storage._load_domain_key("test_domain", base_dir=tmp_path)
+        assert len(key) == 32
+        assert (tmp_path / "secure_storage_secret.key").exists()
+        envelope = json.loads((tmp_path / "_domain_keys" / "test_domain.key").read_text(encoding="utf-8"))
+        assert envelope["provider"] == "passphrase"
+        assert "key" not in envelope
 
 
 class TestPassphraseProvider:
@@ -311,7 +321,7 @@ class TestWrongPassphraseFails:
             ),
         )
 
-        with pytest.raises(mesh_secure_storage.SecureStorageError, match="MESH_SECURE_STORAGE_SECRET is not set"):
+        with pytest.raises(mesh_secure_storage.SecureStorageError, match="Failed to unwrap"):
             mesh_secure_storage._load_master_key()
 
 
@@ -517,12 +527,34 @@ class TestGetStorageSecret:
         from services import config as config_mod
 
         monkeypatch.delenv("MESH_SECURE_STORAGE_SECRET", raising=False)
+        monkeypatch.setattr(mesh_secure_storage, "_is_windows", lambda: True)
         monkeypatch.setattr(
             config_mod,
             "get_settings",
             lambda: SimpleNamespace(MESH_SECURE_STORAGE_SECRET=""),
         )
         assert mesh_secure_storage._get_storage_secret() is None
+
+    def test_generates_local_secret_file_on_non_windows(self, tmp_path, monkeypatch):
+        from services.mesh import mesh_secure_storage
+        from services import config as config_mod
+
+        secret_file = tmp_path / "generated_secret.key"
+        monkeypatch.delenv("MESH_SECURE_STORAGE_SECRET", raising=False)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.setenv("MESH_SECURE_STORAGE_SECRET_FILE", str(secret_file))
+        monkeypatch.setattr(mesh_secure_storage, "_is_windows", lambda: False)
+        monkeypatch.setattr(
+            config_mod,
+            "get_settings",
+            lambda: SimpleNamespace(MESH_SECURE_STORAGE_SECRET=""),
+        )
+
+        first = mesh_secure_storage._get_storage_secret()
+        second = mesh_secure_storage._get_storage_secret()
+        assert first
+        assert second == first
+        assert secret_file.read_text(encoding="utf-8").strip() == first
 
     def test_falls_back_to_config(self, monkeypatch):
         from services.mesh import mesh_secure_storage

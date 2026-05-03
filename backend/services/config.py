@@ -210,6 +210,7 @@ class Settings(BaseSettings):
     MESH_ALLOW_RAW_SECURE_STORAGE_FALLBACK: bool = False
     MESH_ACK_RAW_FALLBACK_AT_OWN_RISK: bool = False
     MESH_SECURE_STORAGE_SECRET: str = ""
+    MESH_SECURE_STORAGE_SECRET_FILE: str = ""
     MESH_PRIVATE_LOG_TTL_S: int = 900
     # Sprint 1 rollout: restored DM boot probes stay disabled by default until
     # the architect reviews false positives from the observe-only path.

@@ -230,11 +230,16 @@ def _raw_fallback_allowed() -> bool:
     return False
 
 
+def _generated_secret_file() -> Path:
+    return DATA_DIR / "secure_storage_secret.key"
+
+
 def _get_storage_secret() -> str | None:
-    """Return the operator-supplied secure storage secret, or None."""
+    """Return the operator-supplied or local generated secure storage secret."""
     secret = os.environ.get("MESH_SECURE_STORAGE_SECRET", "").strip()
     if secret:
         return secret
+    secret_file_override = os.environ.get("MESH_SECURE_STORAGE_SECRET_FILE", "").strip()
     try:
         from services.config import get_settings
 
@@ -242,8 +247,36 @@ def _get_storage_secret() -> str | None:
         secret = str(getattr(settings, "MESH_SECURE_STORAGE_SECRET", "") or "").strip()
         if secret:
             return secret
+        secret_file_override = (
+            secret_file_override
+            or str(getattr(settings, "MESH_SECURE_STORAGE_SECRET_FILE", "") or "").strip()
+        )
     except Exception:
         pass
+    if not _is_windows():
+        if _raw_fallback_allowed():
+            return None
+        secret_file = Path(secret_file_override or _generated_secret_file())
+        try:
+            if secret_file.exists():
+                secret = secret_file.read_text(encoding="utf-8").strip()
+                if secret:
+                    return secret
+            secret_file.parent.mkdir(parents=True, exist_ok=True)
+            secret = _b64(os.urandom(48))
+            _atomic_write_text(secret_file, secret + "\n", encoding="utf-8")
+            try:
+                os.chmod(secret_file, 0o600)
+            except OSError:
+                pass
+            logger.info("Generated local secure storage secret at %s", secret_file)
+            return secret
+        except Exception as exc:
+            logger.warning(
+                "Failed to load or generate local secure storage secret at %s: %s",
+                secret_file,
+                exc,
+            )
     return None
 
 

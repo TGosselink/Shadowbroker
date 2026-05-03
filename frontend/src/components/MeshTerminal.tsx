@@ -364,6 +364,7 @@ function summarizeNodePeer(peerUrl?: string): string {
 }
 
 function describeBootstrapState(snapshot?: InfonetNodeStatusSnapshot | null): string {
+  if (snapshot && !snapshot.node_enabled) return 'READY / DISABLED';
   const bootstrap = snapshot?.bootstrap;
   if (!bootstrap) return 'LOCAL ONLY';
   if (bootstrap.manifest_loaded) {
@@ -376,6 +377,7 @@ function describeBootstrapState(snapshot?: InfonetNodeStatusSnapshot | null): st
 }
 
 function describeSyncOutcome(snapshot?: InfonetNodeStatusSnapshot | null): string {
+  if (snapshot && !snapshot.node_enabled) return 'OFF - click NODE to activate';
   const sync = snapshot?.sync_runtime;
   if (!sync) return 'IDLE';
   const outcome = String(sync.last_outcome || 'idle').trim().toLowerCase();
@@ -431,6 +433,12 @@ function buildNodeRuntimeLines(snapshot: InfonetNodeStatusSnapshot): TermLine[] 
     lines.push({
       text: `    Push Warn:   ${push.last_push_error}`,
       type: 'error',
+    });
+  }
+  if (!snapshot.node_enabled) {
+    lines.push({
+      text: '    Activate:    click the NODE button in the top-right controls to join the public testnet seed',
+      type: 'dim',
     });
   }
   lines.push({ text: '', type: 'dim' });
@@ -5945,7 +5953,7 @@ export default function MeshTerminal({ isOpen, launchToken = 0, onClose, onDmCou
                                 PARTICIPANT NODE
                               </div>
                               <div className="mt-1 text-sm leading-5 text-slate-400">
-                                Automatic bootstrap and sync now live on the backend lane. This node can keep a local chain even with Wormhole off.
+                                Backend bootstrap is configured; activate the participant node to sync the public testnet seed without Wormhole.
                               </div>
                             </div>
                             <div className="border border-cyan-500/20 bg-cyan-500/8 px-3 py-1.5 text-[13px] tracking-[0.22em] text-cyan-200">
