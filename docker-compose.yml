@@ -54,7 +54,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: ${BACKEND_MEMORY_LIMIT:-4G}
           cpus: '2'
 
   frontend:

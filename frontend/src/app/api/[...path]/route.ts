@@ -26,6 +26,8 @@ const STRIP_REQUEST = new Set([
   'transfer-encoding',
   'upgrade',
   'host',
+  'content-length',
+  'expect',
 ]);
 
 // Headers that must not be forwarded back to the browser.
@@ -201,9 +203,10 @@ async function proxy(req: NextRequest, pathSegments: string[]): Promise<NextResp
       cache: 'no-store',
     };
     if (!isBodyless) {
-      requestInit.body = req.body;
-      // Required for streaming request bodies in Node.js fetch
-      requestInit.duplex = 'half';
+      const body = await req.text();
+      if (body.length > 0) {
+        requestInit.body = body;
+      }
     }
     const maxAttempts = isBodyless ? 18 : 1;
     let fetchError: unknown = null;
@@ -214,6 +217,13 @@ async function proxy(req: NextRequest, pathSegments: string[]): Promise<NextResp
         break;
       } catch (error) {
         fetchError = error;
+        if (attempt >= maxAttempts) {
+          console.error('api proxy upstream fetch failed', {
+            method: req.method,
+            target: targetUrl.toString(),
+            error,
+          });
+        }
         if (attempt >= maxAttempts) break;
         await sleep(250);
       }

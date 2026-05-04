@@ -13,8 +13,8 @@ function buildCsp(nonce: string): string {
   const directives = [
     "default-src 'self'",
     isDev
-      ? `script-src 'self' 'unsafe-inline' 'unsafe-eval' 'nonce-${nonce}' blob:`
-      : `script-src 'self' 'unsafe-inline' 'nonce-${nonce}' blob:`,
+      ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:"
+      : "script-src 'self' 'unsafe-inline' blob:",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "img-src 'self' data: blob: https:",
     isDev
@@ -35,7 +35,10 @@ function buildCsp(nonce: string): string {
 export function middleware(request: NextRequest) {
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
 
-  // Forward nonce to server components via request header.
+  // Forward a nonce for future fully-wired CSP support. Do not include it in
+  // script-src until every Next inline bootstrap script receives the nonce;
+  // otherwise production hydration can fail and leave the app on the static
+  // "prioritizing map feeds" shell.
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set('x-nonce', nonce);
 

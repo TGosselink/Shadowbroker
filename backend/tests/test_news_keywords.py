@@ -145,6 +145,10 @@ class TestFeedConfig:
 
     def test_new_east_asia_feeds_present(self):
         names = {f["name"] for f in DEFAULT_FEEDS}
-        expected = {"FocusTaiwan", "Kyodo", "SCMP", "The Diplomat", "Stars and Stripes",
-                    "Yonhap", "Nikkei Asia", "Taipei Times", "Asia Times", "Defense News", "Japan Times"}
+        expected = {"SCMP", "The Diplomat", "Yonhap", "Asia Times", "Defense News", "Japan Times"}
         assert expected.issubset(names)
+
+    def test_known_dead_feeds_are_not_defaulted(self):
+        urls = {f["url"] for f in DEFAULT_FEEDS}
+        assert "https://www.reutersagency.com/feed/?best-topics=world" not in urls
+        assert "https://rsshub.app/apnews/topics/world-news" not in urls

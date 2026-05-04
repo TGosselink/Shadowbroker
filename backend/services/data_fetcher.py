@@ -134,15 +134,22 @@ _INTEL_STARTUP_CACHE_KEYS = (
     "trending_markets",
     "correlations",
     "fimi",
+    "crowdthreat",
+    "uap_sightings",
+    "military_bases",
+    "wastewater",
 )
 _STARTUP_PRIORITY_TIMEOUT_S = float(os.environ.get("SHADOWBROKER_STARTUP_PRIORITY_TIMEOUT_S", "18"))
 _STARTUP_HEAVY_REFRESH_DELAY_S = float(os.environ.get("SHADOWBROKER_STARTUP_HEAVY_REFRESH_DELAY_S", "90"))
 _STARTUP_HEAVY_REFRESH_STARTED = False
 _STARTUP_HEAVY_REFRESH_LOCK = threading.Lock()
+_FETCH_WORKERS = int(os.environ.get("SHADOWBROKER_FETCH_WORKERS", "8"))
+_SLOW_FETCH_CONCURRENCY = int(os.environ.get("SHADOWBROKER_SLOW_FETCH_CONCURRENCY", "4"))
+_STARTUP_HEAVY_CONCURRENCY = int(os.environ.get("SHADOWBROKER_STARTUP_HEAVY_CONCURRENCY", "2"))
 
 # Shared thread pool — reused across all fetch cycles instead of creating/destroying per tick
 _SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=20, thread_name_prefix="fetch"
+    max_workers=max(2, _FETCH_WORKERS), thread_name_prefix="fetch"
 )
 
 
@@ -154,6 +161,14 @@ def _cache_json_safe(value):
     if isinstance(value, (list, tuple)):
         return [_cache_json_safe(v) for v in value]
     return value
+
+
+def _has_cache_value(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple, dict, set)):
+        return bool(value)
+    return True
 
 
 def _load_fast_startup_cache_if_available() -> bool:
@@ -200,10 +215,15 @@ def _save_fast_startup_cache() -> None:
     """Persist recent moving layers for the next cold start."""
     try:
         with _data_lock:
+            layers = {
+                key: latest_data.get(key)
+                for key in _FAST_STARTUP_CACHE_KEYS
+                if _has_cache_value(latest_data.get(key))
+            }
             payload = {
                 "cached_at": time.time(),
                 "last_updated": latest_data.get("last_updated"),
-                "layers": {key: latest_data.get(key) for key in _FAST_STARTUP_CACHE_KEYS},
+                "layers": layers,
                 "freshness": {
                     key: source_timestamps.get(key)
                     for key in _FAST_STARTUP_CACHE_KEYS
@@ -264,10 +284,15 @@ def _save_intel_startup_cache() -> None:
     """Persist compact right-side intelligence data for the next cold start."""
     try:
         with _data_lock:
+            layers = {
+                key: latest_data.get(key)
+                for key in _INTEL_STARTUP_CACHE_KEYS
+                if _has_cache_value(latest_data.get(key))
+            }
             payload = {
                 "cached_at": time.time(),
                 "last_updated": latest_data.get("last_updated"),
-                "layers": {key: latest_data.get(key) for key in _INTEL_STARTUP_CACHE_KEYS},
+                "layers": layers,
                 "freshness": {
                     key: source_timestamps.get(key)
                     for key in _INTEL_STARTUP_CACHE_KEYS
@@ -294,11 +319,27 @@ def seed_startup_caches() -> None:
 # ---------------------------------------------------------------------------
 # Scheduler & Orchestration
 # ---------------------------------------------------------------------------
-def _run_tasks(label: str, funcs: list):
+def _run_tasks(label: str, funcs: list, *, max_concurrency: int | None = None):
     """Run tasks concurrently and log any exceptions (do not fail silently)."""
     if not funcs:
         return
-    futures = {_SHARED_EXECUTOR.submit(func): (func.__name__, time.perf_counter()) for func in funcs}
+    if max_concurrency is None:
+        if label.startswith("slow-tier"):
+            max_concurrency = _SLOW_FETCH_CONCURRENCY
+        elif label.startswith("startup-heavy"):
+            max_concurrency = _STARTUP_HEAVY_CONCURRENCY
+        else:
+            max_concurrency = len(funcs)
+    max_concurrency = max(1, min(max_concurrency, len(funcs)))
+
+    remaining_funcs = list(funcs)
+    while remaining_funcs:
+        batch, remaining_funcs = remaining_funcs[:max_concurrency], remaining_funcs[max_concurrency:]
+        futures = {_SHARED_EXECUTOR.submit(func): (func.__name__, time.perf_counter()) for func in batch}
+        _drain_task_futures(label, futures)
+
+
+def _drain_task_futures(label: str, futures: dict):
     # Iterate directly so future.result(timeout=...) is the blocking call.
     # as_completed() blocks inside __next__() waiting for completion — the timeout
     # on result() would never be reached for a hanging task under that pattern.
@@ -486,6 +527,7 @@ def update_all_data(*, startup_mode: bool = False):
         priority_funcs = [
             fetch_airports,
             update_fast_data,
+            fetch_news,
             fetch_gdelt,
             fetch_crowdthreat,
             fetch_firms_fires,
@@ -520,55 +562,36 @@ def update_all_data(*, startup_mode: bool = False):
             except Exception as e:
                 _record_fetch_failure("startup-priority", name, start, e)
         logger.info("Startup preload: deferring Playwright Liveuamap scraper to scheduled cadence")
+        _save_intel_startup_cache()
         _schedule_delayed_startup_heavy_refresh()
         logger.info("Startup priority preload complete; slow synthesis is warming in background.")
         return
-    futures = {
-        _SHARED_EXECUTOR.submit(fetch_airports): ("fetch_airports", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(update_fast_data): ("update_fast_data", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(update_slow_data): ("update_slow_data", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(fetch_volcanoes): ("fetch_volcanoes", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(fetch_viirs_change_nodes): ("fetch_viirs_change_nodes", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(fetch_unusual_whales): ("fetch_unusual_whales", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(fetch_fimi): ("fetch_fimi", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(fetch_gdelt): ("fetch_gdelt", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(fetch_uap_sightings): ("fetch_uap_sightings", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(fetch_wastewater): ("fetch_wastewater", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(fetch_crowdthreat): ("fetch_crowdthreat", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(fetch_sar_catalog): ("fetch_sar_catalog", time.perf_counter()),
-        _SHARED_EXECUTOR.submit(fetch_sar_products): ("fetch_sar_products", time.perf_counter()),
-    }
+    refresh_funcs = [
+        fetch_airports,
+        update_fast_data,
+        update_slow_data,
+        fetch_volcanoes,
+        fetch_viirs_change_nodes,
+        fetch_unusual_whales,
+        fetch_fimi,
+        fetch_gdelt,
+        fetch_uap_sightings,
+        fetch_wastewater,
+        fetch_crowdthreat,
+        fetch_sar_catalog,
+        fetch_sar_products,
+    ]
     if not startup_mode or not meshtastic_seeded:
-        futures[_SHARED_EXECUTOR.submit(fetch_meshtastic_nodes)] = (
-            "fetch_meshtastic_nodes",
-            time.perf_counter(),
-        )
+        refresh_funcs.append(fetch_meshtastic_nodes)
     else:
         logger.info(
             "Startup preload: Meshtastic cache already loaded, deferring remote map refresh to scheduled cadence"
         )
     if not startup_mode:
-        futures[_SHARED_EXECUTOR.submit(update_liveuamap)] = (
-            "update_liveuamap",
-            time.perf_counter(),
-        )
+        refresh_funcs.append(update_liveuamap)
     else:
         logger.info("Startup preload: deferring Playwright Liveuamap scraper to scheduled cadence")
-    for future, (name, start) in futures.items():
-        try:
-            future.result(timeout=_TASK_HARD_TIMEOUT_S)
-            duration = time.perf_counter() - start
-            from services.fetch_health import record_success
-
-            record_success(name, duration_s=duration)
-            if duration > _SLOW_FETCH_S:
-                logger.warning(f"full-refresh task slow: {name} took {duration:.2f}s")
-        except Exception as e:
-            duration = time.perf_counter() - start
-            from services.fetch_health import record_failure
-
-            record_failure(name, error=e, duration_s=duration)
-            logger.exception(f"full-refresh task failed: {name}")
+    _run_tasks("full-refresh", refresh_funcs, max_concurrency=_STARTUP_HEAVY_CONCURRENCY)
     # Run CCTV ingest immediately so cameras are available on first request
     # (the scheduled job also runs every 10 min for ongoing refresh).
     if startup_mode:

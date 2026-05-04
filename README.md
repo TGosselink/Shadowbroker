@@ -72,6 +72,8 @@ Open `http://localhost:3000` to view the dashboard! *(Requires [Docker Desktop](
 
 > **Backend port already in use?** The browser only needs port `3000`, but the backend API is also published on host port `8000` for local diagnostics. If another app already uses `8000`, create or edit `.env` next to `docker-compose.yml` and set `BACKEND_PORT=8001`, then run `docker compose up -d`.
 
+> **Blank news/UAP/bases/wastewater after several minutes?** Check for backend OOM restarts with `docker events --since 30m --filter container=shadowbroker-backend --filter event=oom`. The default compose file gives the backend 4GB; if your host has less memory, reduce enabled feeds or set `BACKEND_MEMORY_LIMIT=3G` and expect slower/heavier layers to warm more gradually.
+
 > **Podman users:** Podman works, but `podman compose` is a wrapper and still needs a Compose provider installed. On Windows/WSL, if you see `looking up compose provider failed`, install `podman-compose` and run `podman-compose pull` followed by `podman-compose up -d` from inside the cloned `Shadowbroker` folder. On Linux/macOS/WSL shells you can also use `./compose.sh --engine podman pull` and `./compose.sh --engine podman up -d`.
 
 ---
@@ -567,6 +569,9 @@ Open `http://localhost:3000` to view the dashboard.
 > Host port `8000` is only published for local API/debug access. If it conflicts
 > with another service, set `BACKEND_PORT=8001` in `.env`; leave `BACKEND_URL`
 > as `http://backend:8000` because that is the Docker-internal port.
+> The backend memory cap is controlled by `BACKEND_MEMORY_LIMIT` and defaults
+> to `4G`. If Docker reports OOM events, the backend will restart and slow
+> layers can look empty until they repopulate.
 >
 > If your backend runs on a **different host or port**, set `BACKEND_URL` at runtime — no rebuild required:
 >

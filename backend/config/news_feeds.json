@@ -1,16 +1,6 @@
 {
   "feeds": [
     {
-      "name": "Reuters",
-      "url": "https://www.reutersagency.com/feed/?best-topics=world",
-      "weight": 5
-    },
-    {
-      "name": "AP News",
-      "url": "https://rsshub.app/apnews/topics/world-news",
-      "weight": 5
-    },
-    {
       "name": "NPR",
       "url": "https://feeds.npr.org/1004/rss.xml",
       "weight": 4
@@ -99,6 +89,26 @@
       "name": "Japan Times",
       "url": "https://www.japantimes.co.jp/feed/",
       "weight": 3
+    },
+    {
+      "name": "CSM",
+      "url": "https://www.csmonitor.com/rss/world",
+      "weight": 4
+    },
+    {
+      "name": "PBS NewsHour",
+      "url": "https://www.pbs.org/newshour/feeds/rss/world",
+      "weight": 4
+    },
+    {
+      "name": "France 24",
+      "url": "https://www.france24.com/en/rss",
+      "weight": 4
+    },
+    {
+      "name": "DW",
+      "url": "https://rss.dw.com/xml/rss-en-world",
+      "weight": 4
     }
   ]
 }

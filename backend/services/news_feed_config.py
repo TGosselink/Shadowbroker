@@ -15,6 +15,8 @@ _FEED_URL_REPLACEMENTS = {
     "https://www.channelnewsasia.com/rssfeed/8395986": "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml",
 }
 _DEAD_FEED_URLS = {
+    "https://www.reutersagency.com/feed/?best-topics=world",
+    "https://rsshub.app/apnews/topics/world-news",
     "https://www3.nhk.or.jp/nhkworld/rss/world.xml",
     "https://focustaiwan.tw/rss",
     "https://english.kyodonews.net/rss/news.xml",
@@ -29,6 +31,11 @@ DEFAULT_FEEDS = [
     {"name": "AlJazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml", "weight": 2},
     {"name": "NYT", "url": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", "weight": 1},
     {"name": "GDACS", "url": "https://www.gdacs.org/xml/rss.xml", "weight": 5},
+    {"name": "The War Zone", "url": "https://www.twz.com/feed", "weight": 4},
+    {"name": "Bellingcat", "url": "https://www.bellingcat.com/feed/", "weight": 4},
+    {"name": "Guardian", "url": "https://www.theguardian.com/world/rss", "weight": 3},
+    {"name": "TASS", "url": "https://tass.com/rss/v2.xml", "weight": 2},
+    {"name": "Xinhua", "url": "http://www.news.cn/english/rss/worldrss.xml", "weight": 2},
     {"name": "CNA", "url": "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml", "weight": 3},
     {"name": "Mercopress", "url": "https://en.mercopress.com/rss/", "weight": 3},
     {"name": "SCMP", "url": "https://www.scmp.com/rss/91/feed", "weight": 4},
@@ -73,7 +80,9 @@ def get_feeds() -> list[dict]:
                 normalised = _normalise_feeds(feeds)
                 if normalised != feeds:
                     save_feeds(normalised)
-                return normalised
+                if normalised:
+                    return normalised
+                logger.warning("News feed configuration contained no usable feeds; falling back to defaults")
     except (IOError, OSError, json.JSONDecodeError, ValueError) as e:
         logger.warning(f"Failed to read news feed config: {e}")
     return list(DEFAULT_FEEDS)
