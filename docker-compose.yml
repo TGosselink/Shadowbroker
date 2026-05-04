@@ -11,7 +11,7 @@ services:
     image: ghcr.io/bigbodycobain/shadowbroker-backend:latest
     container_name: shadowbroker-backend
     ports:
-      - "${BIND:-127.0.0.1}:8000:8000"
+      - "${BIND:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
     environment:
       - AIS_API_KEY=${AIS_API_KEY:-}
       - OPENSKY_CLIENT_ID=${OPENSKY_CLIENT_ID:-}
@@ -27,6 +27,18 @@ services:
       - MESH_RELAY_PEERS=${MESH_RELAY_PEERS:-}
       # Shared transport auth for operator peer push. Must be set to a unique secret per deployment.
       - MESH_PEER_PUSH_SECRET=${MESH_PEER_PUSH_SECRET:-}
+      # Meshtastic MQTT is opt-in to avoid passive load on the public broker.
+      # Set MESH_MQTT_ENABLED=true in .env only when this node should join live MQTT.
+      - MESH_MQTT_ENABLED=${MESH_MQTT_ENABLED:-false}
+      - MESH_MQTT_BROKER=${MESH_MQTT_BROKER:-mqtt.meshtastic.org}
+      - MESH_MQTT_PORT=${MESH_MQTT_PORT:-1883}
+      - MESH_MQTT_USER=${MESH_MQTT_USER:-meshdev}
+      - MESH_MQTT_PASS=${MESH_MQTT_PASS:-large4cats}
+      - MESH_MQTT_PSK=${MESH_MQTT_PSK:-}
+      - MESH_MQTT_INCLUDE_DEFAULT_ROOTS=${MESH_MQTT_INCLUDE_DEFAULT_ROOTS:-true}
+      - MESH_MQTT_EXTRA_ROOTS=${MESH_MQTT_EXTRA_ROOTS:-}
+      - MESH_MQTT_EXTRA_TOPICS=${MESH_MQTT_EXTRA_TOPICS:-}
+      - MESHTASTIC_OPERATOR_CALLSIGN=${MESHTASTIC_OPERATOR_CALLSIGN:-}
       # The bundled Docker UI talks to the backend across Docker's private bridge.
       # Treat that bridge as local operator access while ports remain bound to 127.0.0.1 by default.
       - SHADOWBROKER_TRUST_DOCKER_BRIDGE_LOCAL_OPERATOR=${SHADOWBROKER_TRUST_DOCKER_BRIDGE_LOCAL_OPERATOR:-1}

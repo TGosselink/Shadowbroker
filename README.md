@@ -70,6 +70,8 @@ docker compose up -d
 
 Open `http://localhost:3000` to view the dashboard! *(Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine)*
 
+> **Backend port already in use?** The browser only needs port `3000`, but the backend API is also published on host port `8000` for local diagnostics. If another app already uses `8000`, create or edit `.env` next to `docker-compose.yml` and set `BACKEND_PORT=8001`, then run `docker compose up -d`.
+
 > **Podman users:** Podman works, but `podman compose` is a wrapper and still needs a Compose provider installed. On Windows/WSL, if you see `looking up compose provider failed`, install `podman-compose` and run `podman-compose pull` followed by `podman-compose up -d` from inside the cloned `Shadowbroker` folder. On Linux/macOS/WSL shells you can also use `./compose.sh --engine podman pull` and `./compose.sh --engine podman up -d`.
 
 ---
@@ -562,7 +564,9 @@ Open `http://localhost:3000` to view the dashboard.
 > **Deploying publicly or on a LAN?** No configuration needed for most setups.
 > The frontend proxies all API calls through the Next.js server to `BACKEND_URL`,
 > which defaults to `http://backend:8000` (Docker internal networking).
-> Port 8000 does not need to be exposed externally.
+> Host port `8000` is only published for local API/debug access. If it conflicts
+> with another service, set `BACKEND_PORT=8001` in `.env`; leave `BACKEND_URL`
+> as `http://backend:8000` because that is the Docker-internal port.
 >
 > If your backend runs on a **different host or port**, set `BACKEND_URL` at runtime — no rebuild required:
 >
@@ -623,7 +627,7 @@ services:
     # image: registry.gitlab.com/bigbodycobain/shadowbroker/backend:latest
     container_name: shadowbroker-backend
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     environment:
       - AIS_API_KEY=your_aisstream_key          # Required — get one free at aisstream.io
       - OPENSKY_CLIENT_ID=                       # Optional — higher flight data rate limits
@@ -653,7 +657,7 @@ volumes:
   backend_data:
 ```
 
-> **How it works:** The frontend container proxies all `/api/*` requests through the Next.js server to `BACKEND_URL` using Docker's internal networking. The browser only ever talks to port 3000 — port 8000 does not need to be exposed externally.
+> **How it works:** The frontend container proxies all `/api/*` requests through the Next.js server to `BACKEND_URL` using Docker's internal networking. The browser only ever talks to port 3000. The backend's host port is for local API/debug access and can be changed with `BACKEND_PORT=8001` without changing `BACKEND_URL`.
 >
 > `BACKEND_URL` is a plain runtime environment variable (not a build-time `NEXT_PUBLIC_*`), so you can change it in Portainer, Uncloud, or any compose editor without rebuilding the image. Set it to the address where your backend is reachable from inside the Docker network (e.g. `http://backend:8000`, `http://192.168.1.50:8000`).
 
@@ -956,8 +960,9 @@ Then confirm authenticated `GET /api/wormhole/status` or `GET /api/settings/worm
 | Variable | Where to set | Purpose |
 |---|---|---|
 | `BACKEND_URL` | `environment` in `docker-compose.yml`, or shell env | URL the Next.js server uses to proxy API calls to the backend. Defaults to `http://backend:8000`. **Runtime variable — no rebuild needed.** |
+| `BACKEND_PORT` | repo-root `.env` or shell env before `docker compose up` | Host port used to expose the backend API for local diagnostics. Defaults to `8000`; set `BACKEND_PORT=8001` if port 8000 is already in use. Does not change Docker-internal `BACKEND_URL`. |
 
-**How it works:** The frontend proxies all `/api/*` requests through the Next.js server to `BACKEND_URL` using Docker's internal networking. Browsers only talk to port 3000; port 8000 never needs to be exposed externally. For local dev without Docker, `BACKEND_URL` defaults to `http://localhost:8000`.
+**How it works:** The frontend proxies all `/api/*` requests through the Next.js server to `BACKEND_URL` using Docker's internal networking. Browsers only talk to port 3000; the backend host port is only for local diagnostics. For local dev without Docker, `BACKEND_URL` defaults to `http://localhost:8000`.
 
 ---
 
