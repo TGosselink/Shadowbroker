@@ -8,7 +8,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
-function buildCsp(nonce: string): string {
+function buildCsp(_nonce: string): string {
   const isDev = process.env.NODE_ENV !== 'production';
   const directives = [
     "default-src 'self'",

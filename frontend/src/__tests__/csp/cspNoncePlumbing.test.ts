@@ -2,8 +2,8 @@
  * Phase 5F-A: CSP nonce plumbing tests.
  *
  * Validates:
- * 1. Nonce appears in document CSP header
- * 2. Nonce differs across repeated requests
+ * 1. Document CSP remains hydration-safe for the Next.js runtime
+ * 2. CSP is deterministic across repeated requests
  * 3. next.config.ts no longer owns a static CSP header
  * 4. Middleware does not break API/static routes (matcher exclusion)
  * 5. Google Fonts domains are preserved in CSP
@@ -41,58 +41,46 @@ function matcherExcludes(path: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Nonce appears in document CSP header
+// 1. Document CSP remains hydration-safe
 // ---------------------------------------------------------------------------
 
-describe('nonce in CSP header', () => {
-  it('CSP header contains a nonce-<value> token in script-src', () => {
+describe('hydration-safe CSP header', () => {
+  it('CSP header does not put nonce tokens in script-src', () => {
     const csp = getCsp();
-    expect(csp).toMatch(/'nonce-[A-Za-z0-9+/=]+'/) ;
+    expect(csp).not.toMatch(/'nonce-[A-Za-z0-9+/=]+'/);
   });
 
-  it('nonce value is a base64-encoded UUID', () => {
+  it('script-src keeps the inline compatibility fallback required by Next hydration', () => {
     const csp = getCsp();
-    const match = csp.match(/'nonce-([A-Za-z0-9+/=]+)'/);
-    expect(match).not.toBeNull();
-    const decoded = Buffer.from(match![1], 'base64').toString();
-    // crypto.randomUUID() produces 8-4-4-4-12 hex with dashes
-    expect(decoded).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
+    expect(csp).toMatch(/script-src [^;]*'unsafe-inline'/);
   });
 
-  it('x-nonce request header is set on the response', () => {
-    const res = callMiddleware();
-    // NextResponse.next({ request: { headers } }) merges into request headers.
-    // The CSP nonce in the header must match the one forwarded to server components.
-    const csp = res.headers.get('Content-Security-Policy') ?? '';
-    const nonceInCsp = csp.match(/'nonce-([A-Za-z0-9+/=]+)'/)?.[1];
-    expect(nonceInCsp).toBeTruthy();
+  it('middleware still returns a CSP header for document requests', () => {
+    const csp = getCsp();
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("script-src 'self'");
   });
 });
 
 // ---------------------------------------------------------------------------
-// 2. Nonce differs across repeated requests
+// 2. CSP is deterministic across repeated requests
 // ---------------------------------------------------------------------------
 
-describe('nonce uniqueness', () => {
-  it('two sequential requests produce different nonces', () => {
+describe('CSP stability', () => {
+  it('two sequential requests produce the same document CSP', () => {
     const csp1 = getCsp();
     const csp2 = getCsp();
-    const nonce1 = csp1.match(/'nonce-([A-Za-z0-9+/=]+)'/)?.[1];
-    const nonce2 = csp2.match(/'nonce-([A-Za-z0-9+/=]+)'/)?.[1];
-    expect(nonce1).toBeTruthy();
-    expect(nonce2).toBeTruthy();
-    expect(nonce1).not.toBe(nonce2);
+    expect(csp1).toBe(csp2);
   });
 
-  it('ten requests produce ten distinct nonces', () => {
-    const nonces = new Set<string>();
+  it('ten requests do not introduce nonce-bearing CSP variants', () => {
+    const csps = new Set<string>();
     for (let i = 0; i < 10; i++) {
       const csp = getCsp();
-      const nonce = csp.match(/'nonce-([A-Za-z0-9+/=]+)'/)?.[1];
-      expect(nonce).toBeTruthy();
-      nonces.add(nonce!);
+      expect(csp).not.toMatch(/'nonce-[A-Za-z0-9+/=]+'/);
+      csps.add(csp);
     }
-    expect(nonces.size).toBe(10);
+    expect(csps.size).toBe(1);
   });
 });
 
@@ -185,8 +173,9 @@ describe('production CSP directive completeness', () => {
     expect(csp).toContain("default-src 'self'");
   });
 
-  it('has script-src with nonce', () => {
-    expect(csp).toMatch(/script-src [^;]*'nonce-/);
+  it('has script-src with hydration compatibility fallback', () => {
+    expect(csp).toMatch(/script-src [^;]*'unsafe-inline'/);
+    expect(csp).not.toMatch(/script-src [^;]*'nonce-/);
   });
 
   it('has style-src with unsafe-inline and fonts.googleapis.com', () => {

@@ -2,7 +2,7 @@
  * Phase 5F-B: Production script-src nonce hardening tests.
  *
  * Validates:
- * 1. Production CSP preserves nonce-based script execution with a compatibility
+ * 1. Production CSP preserves hydration-safe script execution with a compatibility
  *    inline fallback required by the Next.js production runtime
  * 2. Dev CSP retains 'unsafe-inline' and 'unsafe-eval'
  * 3. Unchanged directives (style-src, font-src, worker-src, etc.) intact
@@ -42,7 +42,7 @@ function matcherExcludes(path: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Production CSP keeps nonce hardening without blocking Next hydration
+// 1. Production CSP stays hardened without blocking Next hydration
 // ---------------------------------------------------------------------------
 
 describe('production script-src hardening', () => {
@@ -63,9 +63,9 @@ describe('production script-src hardening', () => {
     expect(scriptSrc).not.toContain("'unsafe-eval'");
   });
 
-  it('production script-src contains nonce', () => {
+  it('production script-src does not contain nonce until all Next inline scripts are wired', () => {
     const scriptSrc = getDirective('script-src');
-    expect(scriptSrc).toMatch(/'nonce-[A-Za-z0-9+/=]+'/);
+    expect(scriptSrc).not.toMatch(/'nonce-[A-Za-z0-9+/=]+'/);
   });
 
   it('production script-src contains self and blob:', () => {
@@ -106,9 +106,9 @@ describe('dev script-src allowances', () => {
     expect(scriptSrc).toContain("'unsafe-eval'");
   });
 
-  it('dev script-src still contains nonce', () => {
+  it('dev script-src also omits nonce to match production hydration behavior', () => {
     const scriptSrc = getDirective('script-src');
-    expect(scriptSrc).toMatch(/'nonce-[A-Za-z0-9+/=]+'/);
+    expect(scriptSrc).not.toMatch(/'nonce-[A-Za-z0-9+/=]+'/);
   });
 
   it('dev connect-src includes localhost backends', () => {
