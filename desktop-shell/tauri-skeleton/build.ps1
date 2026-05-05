@@ -9,6 +9,7 @@ $repoRoot = Resolve-Path (Join-Path $scriptDir "..\..")
 $frontendDir = Join-Path $repoRoot "frontend"
 $frontendOut = Join-Path $frontendDir "out"
 $srcTauriDir = Join-Path $scriptDir "src-tauri"
+$tauriConfigPath = Join-Path $srcTauriDir "tauri.conf.json"
 $companionDir = Join-Path $srcTauriDir "companion-www"
 $backendRuntimeDir = Join-Path $srcTauriDir "backend-runtime"
 $iconsScript = Join-Path $scriptDir "scripts\generate-icons.cjs"
@@ -41,6 +42,18 @@ function Invoke-External {
   finally {
     Pop-Location
   }
+}
+
+function Write-Utf8NoBom {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+    [Parameter(Mandatory = $true)]
+    [string]$Content
+  )
+
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Content, $encoding)
 }
 
 foreach ($tool in @("cargo", "npm", "node")) {
@@ -107,6 +120,7 @@ Write-Host "  -> $fileCount files"
 Write-Host ""
 
 Push-Location $srcTauriDir
+$tauriConfigBackup = $null
 try {
   if (-not $env:SHADOWBROKER_BACKEND_URL) {
     $env:SHADOWBROKER_BACKEND_URL = "http://127.0.0.1:8000"
@@ -131,6 +145,14 @@ try {
     Write-Host "Updater signing:  enabled"
   } else {
     Write-Host "Updater signing:  disabled (set TAURI_SIGNING_PRIVATE_KEY_PATH to emit update signatures)"
+    $tauriConfigBackup = Get-Content -LiteralPath $tauriConfigPath -Raw
+    $tauriConfig = $tauriConfigBackup | ConvertFrom-Json
+    if ($tauriConfig.bundle.createUpdaterArtifacts) {
+      $tauriConfig.bundle.createUpdaterArtifacts = $false
+      $tauriConfig |
+        ConvertTo-Json -Depth 100 |
+        ForEach-Object { Write-Utf8NoBom -Path $tauriConfigPath -Content ($_ + "`n") }
+    }
   }
   Write-Host ""
 
@@ -147,5 +169,8 @@ try {
   }
 }
 finally {
+  if ($null -ne $tauriConfigBackup) {
+    Write-Utf8NoBom -Path $tauriConfigPath -Content $tauriConfigBackup
+  }
   Pop-Location
 }

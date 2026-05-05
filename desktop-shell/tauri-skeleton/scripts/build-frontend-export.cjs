@@ -43,6 +43,18 @@ function prepareBuildTree() {
     filter: shouldCopy,
   });
 
+  const stagedLayoutPath = path.join(buildFrontendDir, 'src', 'app', 'layout.tsx');
+  if (fs.existsSync(stagedLayoutPath)) {
+    const layoutSource = fs.readFileSync(stagedLayoutPath, 'utf8');
+    fs.writeFileSync(
+      stagedLayoutPath,
+      layoutSource
+        .replace(/\n\/\/ The dashboard is a live local runtime[\s\S]*?client polling ever hydrates\.\n/g, '\n')
+        .replace(/\nexport const dynamic = ['"]force-dynamic['"];\n/g, '\n')
+        .replace(/\nexport const revalidate = 0;\n/g, '\n'),
+    );
+  }
+
   const liveNodeModules = path.join(frontendDir, 'node_modules');
   const stagedNodeModules = path.join(buildFrontendDir, 'node_modules');
   if (!fs.existsSync(liveNodeModules)) {
