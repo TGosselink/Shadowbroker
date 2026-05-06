@@ -869,21 +869,35 @@ async def api_get_wormhole_status(request: Request):
 @router.post("/api/wormhole/join", dependencies=[Depends(require_local_operator)])
 @limiter.limit("10/minute")
 async def api_wormhole_join(request: Request):
+    from services.config import get_settings
+
     existing = read_wormhole_settings()
     updated = write_wormhole_settings(
         enabled=True,
-        transport="direct",
-        socks_proxy="",
+        transport="tor_arti",
+        socks_proxy=f"socks5h://127.0.0.1:{int(get_settings().MESH_ARTI_SOCKS_PORT or 9050)}",
         socks_dns=True,
-        anonymous_mode=False,
+        anonymous_mode=True,
     )
     transport_changed = (
-        str(existing.get("transport", "direct")) != "direct"
-        or str(existing.get("socks_proxy", "")) != ""
+        str(existing.get("transport", "direct")) != "tor_arti"
+        or str(existing.get("socks_proxy", "")) != str(updated.get("socks_proxy", ""))
         or bool(existing.get("socks_dns", True)) is not True
-        or bool(existing.get("anonymous_mode", False)) is not False
+        or bool(existing.get("anonymous_mode", False)) is not True
         or bool(existing.get("enabled", False)) is not True
     )
+    tor_result: dict[str, Any] = {"ok": False, "detail": "not started"}
+    try:
+        import asyncio
+        from routers.ai_intel import _write_env_value
+        from services.tor_hidden_service import tor_service
+
+        tor_result = await asyncio.to_thread(tor_service.start)
+        if tor_result.get("ok"):
+            _write_env_value("MESH_ARTI_ENABLED", "true")
+            get_settings.cache_clear()
+    except Exception as exc:
+        tor_result = {"ok": False, "detail": str(exc or type(exc).__name__)}
     bootstrap_wormhole_identity()
     bootstrap_wormhole_persona_state()
     state = (
@@ -905,6 +919,7 @@ async def api_wormhole_join(request: Request):
         "identity": get_transport_identity(),
         "runtime": state,
         "settings": updated,
+        "tor": tor_result,
     }
 
 

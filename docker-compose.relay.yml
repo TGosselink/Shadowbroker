@@ -21,7 +21,6 @@ services:
       resources:
         limits:
           memory: 2G
-          cpus: '2'
 
 volumes:
   relay_data:

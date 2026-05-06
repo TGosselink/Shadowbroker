@@ -21,8 +21,9 @@ services:
       - FINNHUB_API_KEY=${FINNHUB_API_KEY:-}
       # Override allowed CORS origins (comma-separated). Auto-detects LAN IPs if empty.
       - CORS_ORIGINS=${CORS_ORIGINS:-}
-      # Default public Infonet seed used for pull-only sync by fresh installs.
-      - MESH_DEFAULT_SYNC_PEERS=${MESH_DEFAULT_SYNC_PEERS:-https://node.shadowbroker.info}
+      # Private Infonet bootstrap seeds. Seeds are discovery hints, not fixed roots.
+      - MESH_BOOTSTRAP_SEED_PEERS=${MESH_BOOTSTRAP_SEED_PEERS:-http://gqpbunqbgtkcqilvclm3xrkt3zowjyl3s62kkktvojgvxzizamvbrqid.onion:8000}
+      - MESH_DEFAULT_SYNC_PEERS=${MESH_DEFAULT_SYNC_PEERS:-}
       # Operator-trusted sync/push peers. Leave empty unless you control the peer secret on both sides.
       - MESH_RELAY_PEERS=${MESH_RELAY_PEERS:-}
       # Shared transport auth for operator peer push. Must be set to a unique secret per deployment.

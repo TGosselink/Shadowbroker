@@ -21,6 +21,7 @@ export interface InfonetBootstrapSnapshot {
   sync_peer_count?: number;
   push_peer_count?: number;
   operator_peer_count?: number;
+  bootstrap_seed_peer_count?: number;
   default_sync_peer_count?: number;
   last_bootstrap_error?: string;
 }
@@ -69,6 +70,7 @@ export interface InfonetNodeStatusSnapshot {
   sync_runtime?: InfonetSyncRuntimeSnapshot;
   push_runtime?: InfonetPushRuntimeSnapshot;
   private_lane_tier?: string;
+  private_transport_required?: boolean;
 }
 
 export interface NodeSettingsSnapshot {
@@ -79,7 +81,12 @@ export interface NodeSettingsSnapshot {
   node_enabled?: boolean;
 }
 
-export const DEFAULT_INFONET_SEED_URL = 'https://node.shadowbroker.info';
+export interface TorHiddenServiceSnapshot {
+  ok?: boolean;
+  running?: boolean;
+  onion_address?: string;
+  detail?: string;
+}
 
 const CACHE_TTL_MS = 5000;
 
@@ -219,4 +226,11 @@ export async function setInfonetNodeEnabled(enabled: boolean): Promise<NodeSetti
   });
   invalidateInfonetNodeStatusCache();
   return result;
+}
+
+export async function startTorHiddenService(): Promise<TorHiddenServiceSnapshot> {
+  return controlPlaneJson<TorHiddenServiceSnapshot>('/api/settings/tor/start', {
+    method: 'POST',
+    requireAdminSession: false,
+  });
 }

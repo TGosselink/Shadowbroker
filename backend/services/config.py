@@ -32,7 +32,14 @@ class Settings(BaseSettings):
     MESH_ARTI_ENABLED: bool = False
     MESH_ARTI_SOCKS_PORT: int = 9050
     MESH_RELAY_PEERS: str = ""
-    MESH_DEFAULT_SYNC_PEERS: str = "https://node.shadowbroker.info"
+    # Bootstrap seeds are discovery hints, not authoritative network roots.
+    # Nodes promote healthy discovered peers from the store/manifest over time.
+    MESH_BOOTSTRAP_SEED_PEERS: str = "http://gqpbunqbgtkcqilvclm3xrkt3zowjyl3s62kkktvojgvxzizamvbrqid.onion:8000"
+    # Legacy name kept for older compose/.env files.
+    MESH_DEFAULT_SYNC_PEERS: str = ""
+    # Infonet/Wormhole must fail closed to private transports by default.
+    # Set true only for local relay development or explicitly public testnets.
+    MESH_INFONET_ALLOW_CLEARNET_SYNC: bool = False
     MESH_BOOTSTRAP_DISABLED: bool = False
     MESH_BOOTSTRAP_MANIFEST_PATH: str = "data/bootstrap_peers.json"
     MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY: str = ""

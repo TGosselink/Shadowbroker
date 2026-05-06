@@ -1114,9 +1114,10 @@ def _participant_node_enabled() -> bool:
 def _node_runtime_snapshot() -> dict[str, Any]:
     with _NODE_RUNTIME_LOCK:
         return {
-            "node_mode": _NODE_BOOTSTRAP_STATE.get("node_mode", "participant"),
+            "node_mode": _current_node_mode(),
             "node_enabled": _participant_node_enabled(),
-            "bootstrap": dict(_NODE_BOOTSTRAP_STATE),
+            "private_transport_required": _infonet_private_transport_required(),
+            "bootstrap": {**dict(_NODE_BOOTSTRAP_STATE), "node_mode": _current_node_mode()},
             "sync_runtime": get_sync_state().to_dict(),
             "push_runtime": dict(_NODE_PUSH_STATE),
         }
@@ -1149,6 +1150,35 @@ def _set_participant_node_enabled(enabled: bool) -> dict[str, Any]:
     }
 
 
+def _infonet_private_transport_required() -> bool:
+    return not bool(getattr(get_settings(), "MESH_INFONET_ALLOW_CLEARNET_SYNC", False))
+
+
+def _infonet_private_transport_error() -> str:
+    return "private Infonet requires onion/RNS transport; no clearnet sync fallback"
+
+
+def _is_private_infonet_transport(transport: str) -> bool:
+    return str(transport or "").strip().lower() in {"onion", "rns"}
+
+
+def _filter_infonet_sync_records(records: list[Any]) -> list[Any]:
+    if not _infonet_private_transport_required():
+        return records
+    return [
+        record
+        for record in records
+        if _is_private_infonet_transport(str(getattr(record, "transport", "") or ""))
+    ]
+
+
+def _configured_bootstrap_seed_peer_urls() -> list[str]:
+    settings = get_settings()
+    primary = str(getattr(settings, "MESH_BOOTSTRAP_SEED_PEERS", "") or "").strip()
+    legacy = str(getattr(settings, "MESH_DEFAULT_SYNC_PEERS", "") or "").strip()
+    return parse_configured_relay_peers(primary or legacy)
+
+
 def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
     from services.mesh.mesh_bootstrap_manifest import load_bootstrap_manifest_from_settings
     from services.mesh.mesh_peer_store import (
@@ -1167,13 +1197,16 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
     except Exception:
         store = PeerStore(DEFAULT_PEER_STORE_PATH)
 
+    private_transport_required = _infonet_private_transport_required()
     operator_peers = configured_relay_peer_urls()
-    default_sync_peers = parse_configured_relay_peers(
-        str(getattr(get_settings(), "MESH_DEFAULT_SYNC_PEERS", "") or "")
-    )
+    bootstrap_seed_peers = _configured_bootstrap_seed_peer_urls()
+    skipped_clearnet_peers = 0
     for peer_url in operator_peers:
         transport = peer_transport_kind(peer_url)
         if not transport:
+            continue
+        if private_transport_required and not _is_private_infonet_transport(transport):
+            skipped_clearnet_peers += 1
             continue
         store.upsert(
             make_sync_peer_record(
@@ -1195,19 +1228,22 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
         )
 
     operator_peer_set = set(operator_peers)
-    for peer_url in default_sync_peers:
+    for peer_url in bootstrap_seed_peers:
         if peer_url in operator_peer_set:
             continue
         transport = peer_transport_kind(peer_url)
         if not transport:
+            continue
+        if private_transport_required and not _is_private_infonet_transport(transport):
+            skipped_clearnet_peers += 1
             continue
         store.upsert(
             make_bootstrap_peer_record(
                 peer_url=peer_url,
                 transport=transport,
                 role="seed",
-                label="ShadowBroker default seed",
-                signer_id="shadowbroker-default",
+                label="ShadowBroker bootstrap seed",
+                signer_id="shadowbroker-bootstrap",
                 now=timestamp,
             )
         )
@@ -1217,8 +1253,8 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
                 transport=transport,
                 role="seed",
                 source="bundle",
-                label="ShadowBroker default seed",
-                signer_id="shadowbroker-default",
+                label="ShadowBroker bootstrap seed",
+                signer_id="shadowbroker-bootstrap",
                 now=timestamp,
             )
         )
@@ -1232,6 +1268,9 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
 
     if manifest is not None:
         for peer in manifest.peers:
+            if private_transport_required and not _is_private_infonet_transport(peer.transport):
+                skipped_clearnet_peers += 1
+                continue
             store.upsert(
                 make_bootstrap_peer_record(
                     peer_url=peer.peer_url,
@@ -1254,17 +1293,30 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
                 )
             )
 
+    if private_transport_required and skipped_clearnet_peers and not bootstrap_error:
+        bootstrap_error = _infonet_private_transport_error()
+
     store.save()
+    bootstrap_records = store.records_for_bucket("bootstrap")
+    sync_records = store.records_for_bucket("sync")
+    push_records = store.records_for_bucket("push")
+    if private_transport_required:
+        bootstrap_records = [record for record in bootstrap_records if _is_private_infonet_transport(record.transport)]
+        sync_records = [record for record in sync_records if _is_private_infonet_transport(record.transport)]
+        push_records = [record for record in push_records if _is_private_infonet_transport(record.transport)]
     snapshot = {
         "node_mode": mode,
+        "private_transport_required": private_transport_required,
+        "skipped_clearnet_peer_count": skipped_clearnet_peers,
         "manifest_loaded": manifest is not None,
         "manifest_signer_id": manifest.signer_id if manifest is not None else "",
         "manifest_valid_until": int(manifest.valid_until or 0) if manifest is not None else 0,
-        "bootstrap_peer_count": len(store.records_for_bucket("bootstrap")),
-        "sync_peer_count": len(store.records_for_bucket("sync")),
-        "push_peer_count": len(store.records_for_bucket("push")),
+        "bootstrap_peer_count": len(bootstrap_records),
+        "sync_peer_count": len(sync_records),
+        "push_peer_count": len(push_records),
         "operator_peer_count": len(operator_peers),
-        "default_sync_peer_count": len(default_sync_peers),
+        "bootstrap_seed_peer_count": len(bootstrap_seed_peers),
+        "default_sync_peer_count": len(bootstrap_seed_peers),
         "last_bootstrap_error": bootstrap_error,
     }
     with _NODE_RUNTIME_LOCK:
@@ -1285,6 +1337,9 @@ def _peer_sync_response(peer_url: str, body: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_peer_url(peer_url)
     if not normalized:
         raise ValueError("invalid peer URL")
+    transport = peer_transport_kind(normalized)
+    if _infonet_private_transport_required() and not _is_private_infonet_transport(transport):
+        raise RuntimeError(_infonet_private_transport_error())
 
     timeout = int(get_settings().MESH_RELAY_PUSH_TIMEOUT_S or 10)
     kwargs: dict[str, Any] = {
@@ -1292,7 +1347,7 @@ def _peer_sync_response(peer_url: str, body: dict[str, Any]) -> dict[str, Any]:
         "timeout": timeout,
         "headers": {"Content-Type": "application/json"},
     }
-    if peer_transport_kind(normalized) == "onion":
+    if transport == "onion":
         if not bool(get_settings().MESH_ARTI_ENABLED):
             raise RuntimeError("onion sync requires Arti to be enabled")
         if not _check_arti_ready():
@@ -1407,16 +1462,27 @@ def _run_public_sync_cycle() -> SyncWorkerState:
     except Exception:
         store = PeerStore(DEFAULT_PEER_STORE_PATH)
 
-    peers = eligible_sync_peers(store.records(), now=time.time())
+    records = _filter_infonet_sync_records(store.records())
+    peers = eligible_sync_peers(records, now=time.time())
     with _NODE_RUNTIME_LOCK:
         current_state = get_sync_state()
     if not peers:
-        updated = finish_solo_sync(
-            current_state,
-            now=time.time(),
-            current_head=infonet.head_hash,
-            interval_s=int(get_settings().MESH_SYNC_INTERVAL_S or 300),
-        )
+        if _infonet_private_transport_required():
+            updated = finish_sync(
+                current_state,
+                ok=False,
+                error=_infonet_private_transport_error(),
+                now=time.time(),
+                current_head=infonet.head_hash,
+                failure_backoff_s=int(get_settings().MESH_SYNC_FAILURE_BACKOFF_S or 60),
+            )
+        else:
+            updated = finish_solo_sync(
+                current_state,
+                now=time.time(),
+                current_head=infonet.head_hash,
+                interval_s=int(get_settings().MESH_SYNC_INTERVAL_S or 300),
+            )
         with _NODE_RUNTIME_LOCK:
             set_sync_state(updated)
         return updated
@@ -9542,18 +9608,29 @@ async def api_wormhole_join(request: Request):
     existing = read_wormhole_settings()
     updated = write_wormhole_settings(
         enabled=True,
-        transport="direct",
-        socks_proxy="",
+        transport="tor_arti",
+        socks_proxy=f"socks5h://127.0.0.1:{int(get_settings().MESH_ARTI_SOCKS_PORT or 9050)}",
         socks_dns=True,
-        anonymous_mode=False,
+        anonymous_mode=True,
     )
     transport_changed = (
-        str(existing.get("transport", "direct")) != "direct"
-        or str(existing.get("socks_proxy", "")) != ""
+        str(existing.get("transport", "direct")) != "tor_arti"
+        or str(existing.get("socks_proxy", "")) != str(updated.get("socks_proxy", ""))
         or bool(existing.get("socks_dns", True)) is not True
-        or bool(existing.get("anonymous_mode", False)) is not False
+        or bool(existing.get("anonymous_mode", False)) is not True
         or bool(existing.get("enabled", False)) is not True
     )
+    tor_result: dict[str, Any] = {"ok": False, "detail": "not started"}
+    try:
+        from services.tor_hidden_service import tor_service
+        from routers.ai_intel import _write_env_value
+
+        tor_result = await asyncio.to_thread(tor_service.start)
+        if tor_result.get("ok"):
+            _write_env_value("MESH_ARTI_ENABLED", "true")
+            get_settings.cache_clear()
+    except Exception as exc:
+        tor_result = {"ok": False, "detail": str(exc or type(exc).__name__)}
     bootstrap_wormhole_identity()
     bootstrap_wormhole_persona_state()
     state = (
@@ -9575,6 +9652,7 @@ async def api_wormhole_join(request: Request):
         "identity": get_transport_identity(),
         "runtime": state,
         "settings": updated,
+        "tor": tor_result,
     }
 
 

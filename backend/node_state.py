@@ -96,9 +96,10 @@ def _participant_node_enabled() -> bool:
 def _node_runtime_snapshot() -> dict[str, Any]:
     with _NODE_RUNTIME_LOCK:
         return {
-            "node_mode": _NODE_BOOTSTRAP_STATE.get("node_mode", "participant"),
+            "node_mode": _current_node_mode(),
             "node_enabled": _participant_node_enabled(),
-            "bootstrap": dict(_NODE_BOOTSTRAP_STATE),
+            "private_transport_required": _infonet_private_transport_required(),
+            "bootstrap": {**dict(_NODE_BOOTSTRAP_STATE), "node_mode": _current_node_mode()},
             "sync_runtime": get_sync_state().to_dict(),
             "push_runtime": dict(_NODE_PUSH_STATE),
         }
@@ -131,6 +132,30 @@ def _set_participant_node_enabled(enabled: bool) -> dict[str, Any]:
     }
 
 
+def _infonet_private_transport_required() -> bool:
+    from services.config import get_settings
+
+    return not bool(getattr(get_settings(), "MESH_INFONET_ALLOW_CLEARNET_SYNC", False))
+
+
+def _infonet_private_transport_error() -> str:
+    return "private Infonet requires onion/RNS transport; no clearnet sync fallback"
+
+
+def _is_private_infonet_transport(transport: str) -> bool:
+    return str(transport or "").strip().lower() in {"onion", "rns"}
+
+
+def _configured_bootstrap_seed_peer_urls() -> list[str]:
+    from services.config import get_settings
+    from services.mesh.mesh_router import parse_configured_relay_peers
+
+    settings = get_settings()
+    primary = str(getattr(settings, "MESH_BOOTSTRAP_SEED_PEERS", "") or "").strip()
+    legacy = str(getattr(settings, "MESH_DEFAULT_SYNC_PEERS", "") or "").strip()
+    return parse_configured_relay_peers(primary or legacy)
+
+
 def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
     from services.config import get_settings
     from services.mesh.mesh_bootstrap_manifest import load_bootstrap_manifest_from_settings
@@ -155,13 +180,16 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
     except Exception:
         store = PeerStore(DEFAULT_PEER_STORE_PATH)
 
+    private_transport_required = _infonet_private_transport_required()
     operator_peers = configured_relay_peer_urls()
-    default_sync_peers = parse_configured_relay_peers(
-        str(getattr(get_settings(), "MESH_DEFAULT_SYNC_PEERS", "") or "")
-    )
+    bootstrap_seed_peers = _configured_bootstrap_seed_peer_urls()
+    skipped_clearnet_peers = 0
     for peer_url in operator_peers:
         transport = peer_transport_kind(peer_url)
         if not transport:
+            continue
+        if private_transport_required and not _is_private_infonet_transport(transport):
+            skipped_clearnet_peers += 1
             continue
         store.upsert(
             make_sync_peer_record(
@@ -183,19 +211,22 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
         )
 
     operator_peer_set = set(operator_peers)
-    for peer_url in default_sync_peers:
+    for peer_url in bootstrap_seed_peers:
         if peer_url in operator_peer_set:
             continue
         transport = peer_transport_kind(peer_url)
         if not transport:
+            continue
+        if private_transport_required and not _is_private_infonet_transport(transport):
+            skipped_clearnet_peers += 1
             continue
         store.upsert(
             make_bootstrap_peer_record(
                 peer_url=peer_url,
                 transport=transport,
                 role="seed",
-                label="ShadowBroker default seed",
-                signer_id="shadowbroker-default",
+                label="ShadowBroker bootstrap seed",
+                signer_id="shadowbroker-bootstrap",
                 now=timestamp,
             )
         )
@@ -205,8 +236,8 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
                 transport=transport,
                 role="seed",
                 source="bundle",
-                label="ShadowBroker default seed",
-                signer_id="shadowbroker-default",
+                label="ShadowBroker bootstrap seed",
+                signer_id="shadowbroker-bootstrap",
                 now=timestamp,
             )
         )
@@ -220,6 +251,9 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
 
     if manifest is not None:
         for peer in manifest.peers:
+            if private_transport_required and not _is_private_infonet_transport(peer.transport):
+                skipped_clearnet_peers += 1
+                continue
             store.upsert(
                 make_bootstrap_peer_record(
                     peer_url=peer.peer_url,
@@ -242,17 +276,30 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
                 )
             )
 
+    if private_transport_required and skipped_clearnet_peers and not bootstrap_error:
+        bootstrap_error = _infonet_private_transport_error()
+
     store.save()
+    bootstrap_records = store.records_for_bucket("bootstrap")
+    sync_records = store.records_for_bucket("sync")
+    push_records = store.records_for_bucket("push")
+    if private_transport_required:
+        bootstrap_records = [record for record in bootstrap_records if _is_private_infonet_transport(record.transport)]
+        sync_records = [record for record in sync_records if _is_private_infonet_transport(record.transport)]
+        push_records = [record for record in push_records if _is_private_infonet_transport(record.transport)]
     snapshot = {
         "node_mode": mode,
+        "private_transport_required": private_transport_required,
+        "skipped_clearnet_peer_count": skipped_clearnet_peers,
         "manifest_loaded": manifest is not None,
         "manifest_signer_id": manifest.signer_id if manifest is not None else "",
         "manifest_valid_until": int(manifest.valid_until or 0) if manifest is not None else 0,
-        "bootstrap_peer_count": len(store.records_for_bucket("bootstrap")),
-        "sync_peer_count": len(store.records_for_bucket("sync")),
-        "push_peer_count": len(store.records_for_bucket("push")),
+        "bootstrap_peer_count": len(bootstrap_records),
+        "sync_peer_count": len(sync_records),
+        "push_peer_count": len(push_records),
         "operator_peer_count": len(operator_peers),
-        "default_sync_peer_count": len(default_sync_peers),
+        "bootstrap_seed_peer_count": len(bootstrap_seed_peers),
+        "default_sync_peer_count": len(bootstrap_seed_peers),
         "last_bootstrap_error": bootstrap_error,
     }
     with _NODE_RUNTIME_LOCK:

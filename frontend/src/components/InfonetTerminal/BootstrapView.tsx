@@ -11,7 +11,6 @@ import {
 } from '@/mesh/infonetEconomyClient';
 import { generateNodeKeys, getNodeIdentity } from '@/mesh/meshIdentity';
 import {
-  DEFAULT_INFONET_SEED_URL,
   fetchInfonetNodeStatusSnapshot,
   setInfonetNodeEnabled,
   type InfonetNodeStatusSnapshot,
@@ -57,9 +56,12 @@ export default function BootstrapView({ marketId, onBack }: BootstrapViewProps) 
   const nodeEnabled = Boolean(nodeStatus?.node_enabled);
   const nodeMode = String(nodeStatus?.node_mode || 'participant').toUpperCase();
   const syncOutcome = String(nodeStatus?.sync_runtime?.last_outcome || 'idle').toLowerCase();
-  const seedPeerCount = Number(nodeStatus?.bootstrap?.default_sync_peer_count || 0);
+  const seedPeerCount = Number(
+    nodeStatus?.bootstrap?.bootstrap_seed_peer_count ?? nodeStatus?.bootstrap?.default_sync_peer_count ?? 0,
+  );
   const syncPeerCount = Number(nodeStatus?.bootstrap?.sync_peer_count || 0);
   const lastPeerUrl = String(nodeStatus?.sync_runtime?.last_peer_url || '').trim();
+  const privateTransportRequired = Boolean(nodeStatus?.private_transport_required);
 
   const toggleNode = useCallback(async (enabled: boolean) => {
     setNodeToggleBusy(true);
@@ -146,8 +148,10 @@ export default function BootstrapView({ marketId, onBack }: BootstrapViewProps) 
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
             <div>
-              <div className="text-gray-500">Default Seed</div>
-              <div className="text-cyan-300 font-mono break-all">{DEFAULT_INFONET_SEED_URL}</div>
+              <div className="text-gray-500">Transport</div>
+              <div className="text-cyan-300 font-mono break-all">
+                {privateTransportRequired ? 'ONION / RNS ONLY' : 'CLEARNET DEV OVERRIDE'}
+              </div>
             </div>
             <div>
               <div className="text-gray-500">Local Node</div>
@@ -158,15 +162,15 @@ export default function BootstrapView({ marketId, onBack }: BootstrapViewProps) 
             <div>
               <div className="text-gray-500">Sync Path</div>
               <div className="text-white font-mono">
-                {syncPeerCount} peers / {seedPeerCount} default
+                {syncPeerCount} peers / {seedPeerCount} seeds
               </div>
             </div>
           </div>
           <div className="mt-3 flex flex-col md:flex-row md:items-center gap-3">
             <div className="flex-1 text-[11px] text-gray-500 leading-relaxed">
               {nodeEnabled
-                ? `Public chain sync is ${syncOutcome || 'active'}${lastPeerUrl ? ` via ${lastPeerUrl}` : ''}.`
-                : 'Start a local participant node to pull from the default seed and help carry the public Infonet chain while this backend is running.'}
+                ? `Infonet sync is ${syncOutcome || 'active'}${lastPeerUrl ? ` via ${lastPeerUrl}` : ''}.`
+                : 'Start a local participant node to sync through available Wormhole onion/RNS peers while this backend is running.'}
             </div>
             <button
               type="button"
