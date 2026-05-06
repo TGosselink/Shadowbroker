@@ -930,7 +930,11 @@ def fetch_satellites():
             now.year, now.month, now.day, now.hour, now.minute, now.second + now.microsecond / 1e6
         )
 
-        for s in all_sats:
+        for source_sat in all_sats:
+            # Keep the classified cache immutable. The render payload below
+            # strips orbital fields after propagation, and mutating the cached
+            # entry would make the next refresh unable to position satellites.
+            s = dict(source_sat)
             try:
                 mean_motion = s.get("MEAN_MOTION")
                 ecc = s.get("ECCENTRICITY")
