@@ -258,6 +258,16 @@ flight_trails = {}  # {icao_hex: {points: [[lat, lng, alt, ts], ...], last_seen:
 _trails_lock = threading.Lock()
 _MAX_TRACKED_TRAILS = 2000
 
+
+def get_flight_trail(icao24: str) -> list:
+    """Return the accumulated trail for a single aircraft without expanding live payloads."""
+    hex_id = str(icao24 or "").strip().lower()
+    if not hex_id:
+        return []
+    with _trails_lock:
+        points = flight_trails.get(hex_id, {}).get("points", [])
+        return [list(point) for point in points]
+
 # Route enrichment is now served from services.fetchers.route_database, which
 # bulk-loads vrs-standing-data.adsb.lol/routes.csv.gz once per day and looks up
 # callsigns from an in-memory index. Replaces the legacy /api/0/routeset POST,
@@ -612,13 +622,22 @@ def _classify_and_publish(all_adsb_flights):
     )
 
     # --- Trail Accumulation ---
-    _TRAIL_INTERVAL_S = 600  # only record a new trail point every 10 minutes
+    _TRAIL_INTERVAL_S = 60  # selected trails need enough resolution to show where unknown-route traffic came from
 
     def _accumulate_trail(f, now_ts, check_route=True):
         hex_id = f.get("icao24", "").lower()
         if not hex_id:
             return 0, None
-        if check_route and f.get("origin_name", "UNKNOWN") != "UNKNOWN":
+
+        def _known_route_name(value):
+            normalized = str(value or "").strip().upper()
+            return bool(normalized and normalized != "UNKNOWN")
+
+        has_known_route = bool(
+            (f.get("origin_loc") and f.get("dest_loc"))
+            or (_known_route_name(f.get("origin_name")) and _known_route_name(f.get("dest_name")))
+        )
+        if check_route and has_known_route:
             f["trail"] = []
             return 0, hex_id
         lat, lng, alt = f.get("lat"), f.get("lng"), f.get("alt", 0)
@@ -629,7 +648,7 @@ def _classify_and_publish(all_adsb_flights):
         if hex_id not in flight_trails:
             flight_trails[hex_id] = {"points": [], "last_seen": now_ts}
         trail_data = flight_trails[hex_id]
-        # Only append a new point if 10 minutes have passed since the last one
+        # Only append a new point if enough time has passed since the last one
         last_point_ts = trail_data["points"][-1][3] if trail_data["points"] else 0
         if now_ts - last_point_ts < _TRAIL_INTERVAL_S:
             trail_data["last_seen"] = now_ts
@@ -649,14 +668,16 @@ def _classify_and_publish(all_adsb_flights):
 
     now_ts = datetime.utcnow().timestamp()
     with _data_lock:
+        commercial_snapshot = copy.deepcopy(latest_data.get("commercial_flights", []))
+        private_jets_snapshot = copy.deepcopy(latest_data.get("private_jets", []))
+        private_ga_snapshot = copy.deepcopy(latest_data.get("private_flights", []))
         military_snapshot = copy.deepcopy(latest_data.get("military_flights", []))
         tracked_snapshot = copy.deepcopy(latest_data.get("tracked_flights", []))
         raw_flights_snapshot = list(latest_data.get("flights", []))
 
-    # Commercial/private: skip trail if route is known (route line replaces trail)
-    route_check_lists = [commercial, private_jets, private_ga]
-    # Tracked + military: ALWAYS accumulate trails (high-interest flights)
-    always_trail_lists = [existing_tracked, military_snapshot]
+    # Skip trails for any flight with a known route; the route line replaces historical trail.
+    route_check_lists = [commercial_snapshot, private_jets_snapshot, private_ga_snapshot]
+    always_trail_lists = [tracked_snapshot, military_snapshot]
     seen_hexes = set()
     trail_count = 0
     with _trails_lock:
@@ -669,7 +690,7 @@ def _classify_and_publish(all_adsb_flights):
 
         for flist in always_trail_lists:
             for f in flist:
-                count, hex_id = _accumulate_trail(f, now_ts, check_route=False)
+                count, hex_id = _accumulate_trail(f, now_ts, check_route=True)
                 trail_count += count
                 if hex_id:
                     seen_hexes.add(hex_id)
@@ -692,6 +713,13 @@ def _classify_and_publish(all_adsb_flights):
     logger.info(
         f"Trail accumulation: {trail_count} active trails, {len(stale_keys)} pruned, {len(flight_trails)} total"
     )
+
+    with _data_lock:
+        latest_data["commercial_flights"] = commercial_snapshot
+        latest_data["private_jets"] = private_jets_snapshot
+        latest_data["private_flights"] = private_ga_snapshot
+        latest_data["tracked_flights"] = tracked_snapshot
+        latest_data["military_flights"] = military_snapshot
 
     # --- GPS Jamming Detection ---
     # Uses NACp (Navigation Accuracy Category – Position) from ADS-B to infer

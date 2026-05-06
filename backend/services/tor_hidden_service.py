@@ -1,13 +1,9 @@
-"""Tor Hidden Service auto-provisioner.
+"""Tor hidden-service auto-provisioner.
 
 Manages a Tor hidden service that points to the local ShadowBroker backend.
-Tor is started as a subprocess with a generated torrc — no manual config needed.
-Auto-installs the Tor Expert Bundle on Windows if not present.
-
-Usage:
-    from services.tor_hidden_service import tor_service
-    status = tor_service.start()   # -> {"ok": True, "onion_address": "http://xxxx.onion:8000"}
-    tor_service.stop()
+Tor is started as a subprocess with a generated torrc. Windows source installs
+can download the Tor Expert Bundle into backend/data without admin rights.
+Docker images should already include the `tor` package.
 """
 
 from __future__ import annotations
@@ -31,31 +27,33 @@ HOSTNAME_PATH = TOR_DIR / "hidden_service" / "hostname"
 TOR_DATA_DIR = TOR_DIR / "data"
 PIDFILE_PATH = TOR_DIR / "tor.pid"
 
-# Bundled Tor install location (inside our data dir so no admin rights needed)
+# Bundled Tor install location (inside data dir so no admin rights are needed).
 TOR_INSTALL_DIR = TOR_DIR / "tor_bin"
 
-# How long to wait for Tor to generate the hostname file
 _STARTUP_TIMEOUT_S = 90
 _POLL_INTERVAL_S = 1.0
 
-# Tor Expert Bundle download URL (Windows x86_64)
-_TOR_EXPERT_BUNDLE_URL = "https://dist.torproject.org/torbrowser/15.0.8/tor-expert-bundle-windows-x86_64-15.0.8.tar.gz"
+# Windows x86_64 Tor Expert Bundle URLs. Keep a fallback so first-run
+# onboarding does not break when Tor rotates point releases.
+_TOR_EXPERT_BUNDLE_URLS = [
+    "https://dist.torproject.org/torbrowser/15.0.11/tor-expert-bundle-windows-x86_64-15.0.11.tar.gz",
+    "https://dist.torproject.org/torbrowser/15.0.8/tor-expert-bundle-windows-x86_64-15.0.8.tar.gz",
+]
 
 
 def _find_tor_binary() -> str | None:
     """Locate the tor binary on the system, including our bundled install."""
-    # Check our bundled install first
     bundled = TOR_INSTALL_DIR / "tor" / "tor.exe"
     if bundled.exists():
         return str(bundled)
-    # Also check for extracted layout variants
+
     for sub in TOR_INSTALL_DIR.rglob("tor.exe"):
         return str(sub)
 
     tor = shutil.which("tor")
     if tor:
         return tor
-    # Common locations on Windows
+
     for candidate in [
         r"C:\Program Files\Tor Browser\Browser\TorBrowser\Tor\tor.exe",
         r"C:\Program Files (x86)\Tor Browser\Browser\TorBrowser\Tor\tor.exe",
@@ -67,77 +65,65 @@ def _find_tor_binary() -> str | None:
 
 
 def _auto_install_tor() -> str | None:
-    """Download and extract the Tor Expert Bundle. Returns path to tor binary or None."""
+    """Install or download Tor when it is safe to do so."""
     if os.name != "nt":
-        # On Linux/Mac, try package manager
-        try:
-            if shutil.which("apt-get"):
-                subprocess.run(["sudo", "apt-get", "install", "-y", "tor"], check=True, capture_output=True, timeout=120)
-            elif shutil.which("brew"):
-                subprocess.run(["brew", "install", "tor"], check=True, capture_output=True, timeout=120)
-            elif shutil.which("pacman"):
-                subprocess.run(["sudo", "pacman", "-S", "--noconfirm", "tor"], check=True, capture_output=True, timeout=120)
-            else:
-                logger.warning("No supported package manager found for auto-install")
-                return None
-            return shutil.which("tor")
-        except Exception as exc:
-            logger.error("Failed to auto-install Tor via package manager: %s", exc)
-            return None
+        # In Docker this should already be baked into the image. For source
+        # installs we avoid unattended sudo prompts from a web request path.
+        logger.warning("Tor is not installed. Install the tor package or use the Docker image with Tor baked in.")
+        return None
 
-    # Windows: download Tor Expert Bundle (no admin needed)
     TOR_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
-    archive_path = TOR_INSTALL_DIR / "tor-expert-bundle.tar.gz"
-
-    try:
-        logger.info("Downloading Tor Expert Bundle over HTTPS from dist.torproject.org...")
-        urlretrieve(_TOR_EXPERT_BUNDLE_URL, str(archive_path))
-
-        # Verify SHA-256 of the downloaded archive
-        sha256_url = _TOR_EXPERT_BUNDLE_URL + ".sha256sum"
-        sha256_file = TOR_INSTALL_DIR / "sha256sum.txt"
+    for bundle_url in _TOR_EXPERT_BUNDLE_URLS:
+        archive_path = TOR_INSTALL_DIR / "tor-expert-bundle.tar.gz"
         try:
-            urlretrieve(sha256_url, str(sha256_file))
-            expected_hash = sha256_file.read_text().strip().split()[0].lower()
-            import hashlib
-            actual_hash = hashlib.sha256(archive_path.read_bytes()).hexdigest().lower()
-            sha256_file.unlink(missing_ok=True)
-            if actual_hash != expected_hash:
-                logger.error("SHA-256 MISMATCH — download may be compromised! Expected %s, got %s", expected_hash, actual_hash)
-                archive_path.unlink(missing_ok=True)
-                return None
-            logger.info("SHA-256 verified: %s", actual_hash[:16] + "...")
-        except Exception as hash_err:
-            # If we can't fetch the hash file, warn but proceed (HTTPS provides baseline integrity)
-            logger.warning("Could not verify SHA-256 (hash file unavailable): %s — proceeding with HTTPS-only verification", hash_err)
+            logger.info("Downloading Tor Expert Bundle over HTTPS from %s...", bundle_url)
+            urlretrieve(bundle_url, str(archive_path))
 
-        logger.info("Download complete, extracting...")
+            sha256_url = bundle_url + ".sha256sum"
+            sha256_file = TOR_INSTALL_DIR / "sha256sum.txt"
+            try:
+                urlretrieve(sha256_url, str(sha256_file))
+                expected_hash = sha256_file.read_text().strip().split()[0].lower()
+                import hashlib
 
-        # Extract .tar.gz with path traversal protection
-        import tarfile
-        with tarfile.open(str(archive_path), "r:gz") as tar:
-            for member in tar.getmembers():
-                member_path = (TOR_INSTALL_DIR / member.name).resolve()
-                if not str(member_path).startswith(str(TOR_INSTALL_DIR.resolve())):
-                    logger.error("Tar path traversal blocked: %s", member.name)
+                actual_hash = hashlib.sha256(archive_path.read_bytes()).hexdigest().lower()
+                sha256_file.unlink(missing_ok=True)
+                if actual_hash != expected_hash:
+                    logger.error("SHA-256 mismatch for Tor download. Expected %s, got %s", expected_hash, actual_hash)
                     archive_path.unlink(missing_ok=True)
-                    return None
-            tar.extractall(path=str(TOR_INSTALL_DIR))
+                    continue
+                logger.info("SHA-256 verified: %s", actual_hash[:16] + "...")
+            except Exception as hash_err:
+                logger.warning(
+                    "Could not verify SHA-256 (hash file unavailable): %s; proceeding with HTTPS-only verification",
+                    hash_err,
+                )
 
-        # Clean up archive
-        archive_path.unlink(missing_ok=True)
+            logger.info("Download complete, extracting...")
+            import tarfile
 
-        # Find the tor.exe in extracted files
-        for p in TOR_INSTALL_DIR.rglob("tor.exe"):
-            logger.info("Tor installed at: %s", p)
-            return str(p)
+            with tarfile.open(str(archive_path), "r:gz") as tar:
+                for member in tar.getmembers():
+                    member_path = (TOR_INSTALL_DIR / member.name).resolve()
+                    if not str(member_path).startswith(str(TOR_INSTALL_DIR.resolve())):
+                        logger.error("Tar path traversal blocked: %s", member.name)
+                        archive_path.unlink(missing_ok=True)
+                        return None
+                tar.extractall(path=str(TOR_INSTALL_DIR))
 
-        logger.error("tor.exe not found after extraction")
-        return None
-    except Exception as exc:
-        logger.error("Failed to download/extract Tor: %s", exc)
-        archive_path.unlink(missing_ok=True)
-        return None
+            archive_path.unlink(missing_ok=True)
+
+            for p in TOR_INSTALL_DIR.rglob("tor.exe"):
+                logger.info("Tor installed at: %s", p)
+                return str(p)
+
+            logger.error("tor.exe not found after extracting %s", bundle_url)
+        except Exception as exc:
+            logger.error("Failed to download/extract Tor from %s: %s", bundle_url, exc)
+        finally:
+            archive_path.unlink(missing_ok=True)
+
+    return None
 
 
 class TorHiddenService:
@@ -150,7 +136,6 @@ class TorHiddenService:
         self._running = False
         self._error: str = ""
 
-        # Check if we already have a hostname from a previous run
         if HOSTNAME_PATH.exists():
             try:
                 hostname = HOSTNAME_PATH.read_text().strip()
@@ -198,19 +183,20 @@ class TorHiddenService:
             self._error = ""
             tor_bin = _find_tor_binary()
             if not tor_bin:
-                logger.info("Tor not found, attempting auto-install...")
+                logger.info("Tor not found, attempting bootstrap...")
                 tor_bin = _auto_install_tor()
             if not tor_bin:
-                self._error = "Failed to auto-install Tor. Please install it manually."
+                self._error = (
+                    "Could not prepare Tor automatically. Check network access to dist.torproject.org "
+                    "or install Tor, then try again."
+                )
                 return {"ok": False, "detail": self._error}
 
-            # Create directories
             TOR_DIR.mkdir(parents=True, exist_ok=True)
             TOR_DATA_DIR.mkdir(parents=True, exist_ok=True)
             hidden_service_dir = TOR_DIR / "hidden_service"
             hidden_service_dir.mkdir(parents=True, exist_ok=True)
 
-            # On non-Windows, Tor requires strict permissions on HiddenServiceDir
             if os.name != "nt":
                 try:
                     os.chmod(str(hidden_service_dir), 0o700)
@@ -218,19 +204,15 @@ class TorHiddenService:
                 except OSError:
                     pass
 
-            # Write torrc — enables both hidden service (inbound) and SOCKS proxy
-            # (outbound) so the mesh/wormhole system can route node-to-node
-            # traffic through Tor as well.
             torrc_content = (
                 f"DataDirectory {TOR_DATA_DIR.as_posix()}\n"
                 f"HiddenServiceDir {hidden_service_dir.as_posix()}\n"
                 f"HiddenServicePort {target_port} 127.0.0.1:{target_port}\n"
-                f"SocksPort 9050\n"
-                f"Log notice stderr\n"
+                "SocksPort 9050\n"
+                "Log notice stderr\n"
             )
             TORRC_PATH.write_text(torrc_content, encoding="utf-8")
 
-            # Start Tor
             try:
                 self._process = subprocess.Popen(
                     [tor_bin, "-f", str(TORRC_PATH)],
@@ -245,15 +227,12 @@ class TorHiddenService:
                 logger.error(self._error)
                 return {"ok": False, "detail": self._error}
 
-            # Wait for hostname file to appear
             deadline = time.monotonic() + _STARTUP_TIMEOUT_S
             while time.monotonic() < deadline:
                 if self._process.poll() is not None:
-                    # Tor exited prematurely
                     stdout = self._process.stdout.read() if self._process.stdout else ""
                     self._error = f"Tor exited with code {self._process.returncode}"
                     if stdout:
-                        # Get last few lines for error context
                         lines = stdout.strip().split("\n")
                         self._error += ": " + " | ".join(lines[-3:])
                     self._running = False
@@ -273,7 +252,6 @@ class TorHiddenService:
 
                 time.sleep(_POLL_INTERVAL_S)
 
-            # Timeout
             self._error = f"Tor did not generate hostname within {_STARTUP_TIMEOUT_S}s"
             self.stop()
             return {"ok": False, "detail": self._error}
@@ -292,10 +270,7 @@ class TorHiddenService:
                         pass
                 self._process = None
             self._running = False
-            # Keep the onion_address — it persists across restarts
-            # since the key is stored in hidden_service_dir
             return {"ok": True, "detail": "stopped"}
 
 
-# Singleton
 tor_service = TorHiddenService()

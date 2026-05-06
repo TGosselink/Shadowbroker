@@ -73,7 +73,7 @@ def fetch_with_curl(url, method="GET", json_data=None, timeout=15, headers=None,
     both Python requests and the barebones Windows system curl.
     """
     default_headers = {
-        "User-Agent": "ShadowBroker-OSINT/0.9.7 (+https://github.com/BigBodyCobain/Shadowbroker; contact: bigbodycobain@gmail.com)",
+        "User-Agent": "ShadowBroker-OSINT/0.9.75 (+https://github.com/BigBodyCobain/Shadowbroker; contact: bigbodycobain@gmail.com)",
     }
     if headers:
         default_headers.update(headers)

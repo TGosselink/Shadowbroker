@@ -339,14 +339,59 @@ def get_country_from_mmsi(mmsi: int) -> str:
 
 # Global vessel store: MMSI → vessel dict
 _vessels: dict[int, dict] = {}
+_vessel_trails: dict[int, dict] = {}
 _vessels_lock = threading.Lock()
 _ws_thread: threading.Thread | None = None
 _ws_running = False
 _proxy_process = None
+_VESSEL_TRAIL_INTERVAL_S = 120
+_VESSEL_TRAIL_MAX_POINTS = 240
 
 import os
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "ais_cache.json")
+
+
+def _record_vessel_trail_locked(mmsi: int, lat, lng, sog=0, now_ts: float | None = None) -> None:
+    """Append a sampled AIS trail point. Caller must hold _vessels_lock."""
+    if lat is None or lng is None:
+        return
+    try:
+        lat_f = float(lat)
+        lng_f = float(lng)
+    except (TypeError, ValueError):
+        return
+    if abs(lat_f) > 90 or abs(lng_f) > 180 or (lat_f == 0 and lng_f == 0):
+        return
+    now = now_ts or time.time()
+    trail_data = _vessel_trails.setdefault(int(mmsi), {"points": [], "last_seen": now})
+    point = [round(lat_f, 5), round(lng_f, 5), round(float(sog or 0), 1), round(now)]
+    last_point_ts = trail_data["points"][-1][3] if trail_data["points"] else 0
+    if now - last_point_ts < _VESSEL_TRAIL_INTERVAL_S:
+        trail_data["last_seen"] = now
+        return
+    if (
+        trail_data["points"]
+        and trail_data["points"][-1][0] == point[0]
+        and trail_data["points"][-1][1] == point[1]
+    ):
+        trail_data["last_seen"] = now
+        return
+    trail_data["points"].append(point)
+    trail_data["last_seen"] = now
+    if len(trail_data["points"]) > _VESSEL_TRAIL_MAX_POINTS:
+        trail_data["points"] = trail_data["points"][-_VESSEL_TRAIL_MAX_POINTS:]
+
+
+def get_vessel_trail(mmsi: int) -> list:
+    """Return the accumulated trail for a single vessel without expanding live payloads."""
+    try:
+        key = int(mmsi)
+    except (TypeError, ValueError):
+        return []
+    with _vessels_lock:
+        points = _vessel_trails.get(key, {}).get("points", [])
+        return [list(point) for point in points]
 
 
 def _save_cache():
@@ -391,6 +436,7 @@ def prune_stale_vessels():
         stale_keys = [k for k, v in _vessels.items() if v.get("_updated", 0) < stale_cutoff]
         for k in stale_keys:
             del _vessels[k]
+            _vessel_trails.pop(k, None)
     if stale_keys:
         logger.info(f"AIS pruned {len(stale_keys)} stale vessels")
 
@@ -459,6 +505,7 @@ def ingest_ais_catcher(msgs: list[dict]) -> int:
                     heading = msg.get("heading", 511)
                     vessel["heading"] = heading if heading != 511 else vessel.get("cog", 0)
                     vessel["_updated"] = now
+                    _record_vessel_trail_locked(mmsi, lat, lon, vessel["sog"], now)
                     if msg.get("shipname"):
                         vessel["name"] = msg["shipname"].strip()
                     count += 1
@@ -595,7 +642,9 @@ def _ais_stream_loop():
                         vessel["cog"] = report.get("Cog", 0)
                         heading = report.get("TrueHeading", 511)
                         vessel["heading"] = heading if heading != 511 else report.get("Cog", 0)
-                        vessel["_updated"] = time.time()
+                        now_ts = time.time()
+                        vessel["_updated"] = now_ts
+                        _record_vessel_trail_locked(mmsi, lat, lng, vessel["sog"], now_ts)
                         # Use metadata name if we don't have one yet
                         if not vessel.get("name") or vessel["name"] == "UNKNOWN":
                             vessel["name"] = (

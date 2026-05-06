@@ -117,6 +117,17 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
     setMeshView,
     meshDirectTarget,
     setMeshDirectTarget,
+    meshMqttSettings,
+    meshMqttForm,
+    setMeshMqttForm,
+    meshMqttBusy,
+    meshMqttStatusText,
+    meshMqttEnabled,
+    meshMqttRunning,
+    meshMqttConnected,
+    meshMqttConnectionLabel,
+    saveMeshMqttSettings,
+    refreshMeshMqttSettings,
     // Identity
     identity,
     publicIdentity,
@@ -1155,17 +1166,179 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                       >
                         INBOX
                       </button>
+                      <button
+                        onClick={() => setMeshView('settings')}
+                        className={`px-2 py-0.5 text-[11px] font-mono tracking-wider border transition-colors ${
+                          meshView === 'settings'
+                            ? 'border-cyan-500/40 text-cyan-300 bg-cyan-950/20'
+                            : 'border-[var(--border-primary)]/40 text-[var(--text-muted)] hover:text-cyan-300'
+                        }`}
+                      >
+                        SETTINGS
+                      </button>
                     </div>
-                    <div className="text-[10px] font-mono text-[var(--text-muted)] truncate">
+                    <div
+                      className={`text-[10px] font-mono truncate ${
+                        meshMqttConnected
+                          ? 'text-green-300/80'
+                          : meshMqttEnabled
+                            ? 'text-amber-300/80'
+                            : 'text-[var(--text-muted)]'
+                      }`}
+                    >
                       {meshSessionActive && publicMeshAddress
-                        ? `ADDR ${publicMeshAddress.toUpperCase()}`
+                        ? `${meshMqttConnectionLabel} / ADDR ${publicMeshAddress.toUpperCase()}`
                         : publicMeshAddress
-                          ? 'MESH OFF / KEY SAVED'
-                          : 'NO PUBLIC MESH ADDRESS'}
+                          ? `${meshMqttConnectionLabel} / KEY SAVED`
+                          : `${meshMqttConnectionLabel} / NO ADDRESS`}
                     </div>
                   </div>
                   <div className="flex-1 overflow-y-auto styled-scrollbar px-3 py-1.5 border-l-2 border-cyan-800/25">
-                    {!meshSessionActive && (
+                    {meshView === 'settings' && (
+                      <div className="space-y-2 py-1 text-[11px] font-mono">
+                        <div className="border border-cyan-800/35 bg-cyan-950/10 p-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <div className="text-cyan-300 tracking-[0.18em]">MESHTASTIC MQTT</div>
+                              <div className="mt-1 text-[10px] text-[var(--text-muted)] leading-[1.5]">
+                                Public Mesh is separate from Wormhole. Turning MQTT on disables the private Wormhole lane for MeshChat.
+                              </div>
+                            </div>
+                            <span
+                              className={`shrink-0 border px-2 py-1 text-[10px] tracking-[0.16em] ${
+                                meshMqttConnected
+                                  ? 'border-green-500/40 text-green-300'
+                                  : meshMqttEnabled
+                                    ? 'border-amber-500/40 text-amber-300'
+                                    : 'border-red-500/35 text-red-300'
+                              }`}
+                            >
+                              {meshMqttConnectionLabel}
+                            </span>
+                          </div>
+                          {meshMqttSettings?.runtime?.last_error && (
+                            <div className="mt-2 text-red-300/80">
+                              LAST ERROR: {meshMqttSettings.runtime.last_error}
+                            </div>
+                          )}
+                          {meshMqttRunning && !meshMqttConnected && !meshMqttSettings?.runtime?.last_error && (
+                            <div className="mt-2 text-amber-300/80">
+                              MQTT bridge is starting. Live messages appear after broker connect.
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-[1fr_70px] gap-2">
+                          <label className="space-y-1">
+                            <span className="text-[var(--text-muted)]">BROKER</span>
+                            <input
+                              value={meshMqttForm.broker}
+                              onChange={(e) => setMeshMqttForm((prev) => ({ ...prev, broker: e.target.value }))}
+                              className="w-full border border-[var(--border-primary)] bg-black/30 px-2 py-1 text-cyan-200 outline-none focus:border-cyan-500/50"
+                            />
+                          </label>
+                          <label className="space-y-1">
+                            <span className="text-[var(--text-muted)]">PORT</span>
+                            <input
+                              value={meshMqttForm.port}
+                              onChange={(e) => setMeshMqttForm((prev) => ({ ...prev, port: e.target.value }))}
+                              className="w-full border border-[var(--border-primary)] bg-black/30 px-2 py-1 text-cyan-200 outline-none focus:border-cyan-500/50"
+                            />
+                          </label>
+                        </div>
+
+                        <label className="block space-y-1">
+                          <span className="text-[var(--text-muted)]">BROKER LOGIN (optional)</span>
+                          <input
+                            value={meshMqttForm.username}
+                            onChange={(e) => setMeshMqttForm((prev) => ({ ...prev, username: e.target.value }))}
+                            placeholder="blank uses public Meshtastic default"
+                            className="w-full border border-[var(--border-primary)] bg-black/30 px-2 py-1 text-cyan-200 outline-none focus:border-cyan-500/50"
+                          />
+                        </label>
+
+                        <label className="block space-y-1">
+                          <span className="text-[var(--text-muted)]">
+                            BROKER PASSWORD {meshMqttSettings?.uses_default_credentials ? '(public default)' : meshMqttSettings?.has_password ? '(saved)' : ''}
+                          </span>
+                          <input
+                            type="password"
+                            value={meshMqttForm.password}
+                            onChange={(e) => setMeshMqttForm((prev) => ({ ...prev, password: e.target.value }))}
+                            placeholder={
+                              meshMqttSettings?.uses_default_credentials
+                                ? 'blank uses public Meshtastic default'
+                                : meshMqttSettings?.has_password
+                                  ? 'leave blank to keep saved password'
+                                  : 'blank uses public Meshtastic default'
+                            }
+                            className="w-full border border-[var(--border-primary)] bg-black/30 px-2 py-1 text-cyan-200 outline-none placeholder:text-[var(--text-muted)] focus:border-cyan-500/50"
+                          />
+                        </label>
+
+                        <label className="block space-y-1">
+                          <span className="text-[var(--text-muted)]">
+                            CHANNEL PSK HEX {meshMqttSettings?.has_psk ? '(saved)' : '(default LongFast if blank)'}
+                          </span>
+                          <input
+                            type="password"
+                            value={meshMqttForm.psk}
+                            onChange={(e) => setMeshMqttForm((prev) => ({ ...prev, psk: e.target.value }))}
+                            placeholder="blank uses default LongFast key"
+                            className="w-full border border-[var(--border-primary)] bg-black/30 px-2 py-1 text-cyan-200 outline-none placeholder:text-[var(--text-muted)] focus:border-cyan-500/50"
+                          />
+                        </label>
+
+                        <label className="flex items-center gap-2 border border-[var(--border-primary)]/40 bg-black/20 px-2 py-1 text-cyan-200">
+                          <input
+                            type="checkbox"
+                            checked={meshMqttForm.include_default_roots}
+                            onChange={(e) =>
+                              setMeshMqttForm((prev) => ({ ...prev, include_default_roots: e.target.checked }))
+                            }
+                          />
+                          DEFAULT PUBLIC ROOTS
+                        </label>
+
+                        <label className="block space-y-1">
+                          <span className="text-[var(--text-muted)]">EXTRA ROOTS</span>
+                          <input
+                            value={meshMqttForm.extra_roots}
+                            onChange={(e) => setMeshMqttForm((prev) => ({ ...prev, extra_roots: e.target.value }))}
+                            placeholder="comma separated, optional"
+                            className="w-full border border-[var(--border-primary)] bg-black/30 px-2 py-1 text-cyan-200 outline-none placeholder:text-[var(--text-muted)] focus:border-cyan-500/50"
+                          />
+                        </label>
+
+                        <div className="grid grid-cols-3 gap-2 pt-1">
+                          <button
+                            onClick={() => void saveMeshMqttSettings({ enabled: true })}
+                            disabled={meshMqttBusy}
+                            className="border border-green-600/40 bg-green-950/20 px-2 py-1.5 text-green-300 hover:bg-green-950/35 disabled:opacity-50"
+                          >
+                            ENABLE
+                          </button>
+                          <button
+                            onClick={() => void saveMeshMqttSettings({ enabled: false })}
+                            disabled={meshMqttBusy}
+                            className="border border-red-600/35 bg-red-950/15 px-2 py-1.5 text-red-300 hover:bg-red-950/25 disabled:opacity-50"
+                          >
+                            DISABLE
+                          </button>
+                          <button
+                            onClick={() => void refreshMeshMqttSettings()}
+                            disabled={meshMqttBusy}
+                            className="border border-cyan-700/40 bg-cyan-950/15 px-2 py-1.5 text-cyan-300 hover:bg-cyan-950/25 disabled:opacity-50"
+                          >
+                            REFRESH
+                          </button>
+                        </div>
+                        {meshMqttStatusText && (
+                          <div className="text-[10px] text-cyan-200/80 leading-[1.5]">{meshMqttStatusText}</div>
+                        )}
+                      </div>
+                    )}
+                    {!meshSessionActive && meshView !== 'settings' && (
                       <div className="text-[12px] font-mono text-green-300/70 text-center py-4 leading-[1.65]">
                         MeshChat is off. Turn it on to connect the public mesh lane.
                       </div>

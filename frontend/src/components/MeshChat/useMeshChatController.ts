@@ -15,9 +15,6 @@ import {
 import type { DesktopControlAuditReport } from '@/lib/desktopControlContract';
 import { fetchPrivacyProfileSnapshot } from '@/mesh/controlPlaneStatusClient';
 import {
-  clearBrowserIdentityState,
-  derivePublicMeshAddress,
-  generateNodeKeys,
   getNodeIdentity,
   getStoredNodeDescriptor,
   getWormholeIdentityDescriptor,
@@ -31,9 +28,7 @@ import {
   updateContact,
   blockContact,
   getDMNotify,
-  getPublicKeyAlgo,
   nextSequence,
-  signEvent,
   verifyEventSignature,
   verifyRawSignature,
   purgeBrowserContactGraph,
@@ -130,7 +125,6 @@ import {
   preferredDmPeerId,
 } from '@/mesh/meshDmConsent';
 import { deriveSasPhrase } from '@/mesh/meshSas';
-import { PROTOCOL_VERSION } from '@/mesh/meshProtocol';
 import { validateEventPayload } from '@/mesh/meshSchema';
 import {
   buildDmTrustHint,
@@ -221,6 +215,94 @@ interface GateCompatConsentPromptState {
   gateId: string;
   action: 'compose' | 'post' | 'decrypt';
   reason: string;
+}
+
+interface MeshMqttRuntime {
+  enabled?: boolean;
+  running?: boolean;
+  connected?: boolean;
+  broker?: string;
+  port?: number;
+  username?: string;
+  client_id?: string;
+  message_log_size?: number;
+  signal_log_size?: number;
+  last_error?: string;
+  last_connected_at?: number;
+  last_disconnected_at?: number;
+}
+
+interface MeshMqttSettings {
+  enabled: boolean;
+  broker: string;
+  port: number;
+  username: string;
+  uses_default_credentials?: boolean;
+  has_password: boolean;
+  has_psk: boolean;
+  include_default_roots: boolean;
+  extra_roots: string;
+  extra_topics: string;
+  runtime?: MeshMqttRuntime;
+}
+
+interface MeshMqttForm {
+  broker: string;
+  port: string;
+  username: string;
+  password: string;
+  psk: string;
+  include_default_roots: boolean;
+  extra_roots: string;
+  extra_topics: string;
+}
+
+const PUBLIC_MESH_ADDRESS_KEY = 'sb_public_meshtastic_address';
+
+function normalizePublicMeshAddress(value: string): string {
+  const raw = String(value || '').trim().toLowerCase();
+  const body = raw.startsWith('!') ? raw.slice(1) : raw;
+  if (!/^[0-9a-f]{8}$/.test(body)) return '';
+  return `!${body}`;
+}
+
+function readStoredPublicMeshAddress(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return normalizePublicMeshAddress(window.localStorage.getItem(PUBLIC_MESH_ADDRESS_KEY) || '');
+  } catch {
+    return '';
+  }
+}
+
+function writeStoredPublicMeshAddress(address: string): void {
+  if (typeof window === 'undefined') return;
+  const normalized = normalizePublicMeshAddress(address);
+  if (!normalized) return;
+  try {
+    window.localStorage.setItem(PUBLIC_MESH_ADDRESS_KEY, normalized);
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearStoredPublicMeshAddress(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(PUBLIC_MESH_ADDRESS_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+function createPublicMeshAddress(): string {
+  if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
+    const value = new Uint32Array(1);
+    window.crypto.getRandomValues(value);
+    if (value[0]) return `!${value[0].toString(16).padStart(8, '0')}`;
+  }
+  const fallback = Math.floor((Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0);
+  return `!${fallback.toString(16).padStart(8, '0')}`;
 }
 
 function describeGateCompatConsentRequired(): string {
@@ -315,8 +397,21 @@ export function useMeshChatController({
   const [meshQuickStatus, setMeshQuickStatus] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [meshSessionActive, setMeshSessionActive] = useState(false);
   const [publicMeshAddress, setPublicMeshAddress] = useState('');
-  const [meshView, setMeshView] = useState<'channel' | 'inbox'>('channel');
+  const [meshView, setMeshView] = useState<'channel' | 'inbox' | 'settings'>('channel');
   const [meshDirectTarget, setMeshDirectTarget] = useState('');
+  const [meshMqttSettings, setMeshMqttSettings] = useState<MeshMqttSettings | null>(null);
+  const [meshMqttForm, setMeshMqttForm] = useState<MeshMqttForm>({
+    broker: 'mqtt.meshtastic.org',
+    port: '1883',
+    username: '',
+    password: '',
+    psk: '',
+    include_default_roots: true,
+    extra_roots: '',
+    extra_topics: '',
+  });
+  const [meshMqttBusy, setMeshMqttBusy] = useState(false);
+  const [meshMqttStatusText, setMeshMqttStatusText] = useState('');
 
   // Identity
   const [identity, setIdentity] = useState<NodeIdentity | null>(null);
@@ -329,15 +424,123 @@ export function useMeshChatController({
   const [recentPrivateFallbackReason, setRecentPrivateFallbackReason] = useState('');
   const [unresolvedSenderSealCount, setUnresolvedSenderSealCount] = useState(0);
   const [privacyProfile, setPrivacyProfile] = useState<'default' | 'high'>('default');
-  const storedPublicIdentity = clientHydrated ? getNodeIdentity() : null;
-  const hasStoredPublicLaneIdentity = clientHydrated && Boolean(storedPublicIdentity) && hasSovereignty();
-  const publicIdentity = meshSessionActive ? storedPublicIdentity : null;
-  const hasPublicLaneIdentity = meshSessionActive && hasStoredPublicLaneIdentity;
+  const storedPublicMeshAddress = clientHydrated ? readStoredPublicMeshAddress() : '';
+  const hasStoredPublicLaneIdentity = clientHydrated && Boolean(storedPublicMeshAddress);
+  const publicIdentity = null;
+  const hasPublicLaneIdentity = meshSessionActive && Boolean(publicMeshAddress);
   const hasId = Boolean(identity) && (hasSovereignty() || wormholeEnabled);
   const shouldShowIdentityWarning = activeTab !== 'meshtastic' && !hasId;
   const privateInfonetReady = wormholeEnabled && wormholeReadyState;
   const publicMeshBlockedByWormhole = wormholeEnabled || wormholeReadyState;
   const dmSendQueue = useRef<(() => Promise<void>)[]>([]);
+  const meshMqttRuntime = meshMqttSettings?.runtime;
+  const meshMqttEnabled = Boolean(meshMqttSettings?.enabled || meshMqttRuntime?.enabled);
+  const meshMqttRunning = Boolean(meshMqttRuntime?.running);
+  const meshMqttConnected = Boolean(meshMqttRuntime?.connected);
+  const meshMqttConnectionLabel = !meshMqttEnabled
+    ? 'MQTT OFF'
+    : meshMqttConnected
+      ? 'MQTT LIVE'
+      : meshMqttRunning
+        ? 'MQTT CONNECTING'
+        : 'MQTT STARTING';
+
+  const applyMeshMqttSettings = useCallback((data: MeshMqttSettings) => {
+    setMeshMqttSettings(data);
+    setMeshMqttForm((prev) => ({
+      broker: data.broker || prev.broker || 'mqtt.meshtastic.org',
+      port: String(data.port || prev.port || '1883'),
+      username: data.uses_default_credentials ? '' : data.username || prev.username || '',
+      password: '',
+      psk: '',
+      include_default_roots: Boolean(data.include_default_roots),
+      extra_roots: data.extra_roots || '',
+      extra_topics: data.extra_topics || '',
+    }));
+  }, []);
+
+  const refreshMeshMqttSettings = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/settings/meshtastic-mqtt`, { cache: 'no-store' });
+      if (!res.ok) return null;
+      const data = (await res.json()) as MeshMqttSettings;
+      applyMeshMqttSettings(data);
+      return data;
+    } catch {
+      return null;
+    }
+  }, [applyMeshMqttSettings]);
+
+  const saveMeshMqttSettings = useCallback(
+    async (updates: Partial<MeshMqttForm> & { enabled?: boolean } = {}) => {
+      setMeshMqttBusy(true);
+      setMeshMqttStatusText('');
+      try {
+        const nextForm = { ...meshMqttForm, ...updates };
+          const body: Record<string, unknown> = {
+            broker: nextForm.broker.trim() || 'mqtt.meshtastic.org',
+            port: Number.parseInt(nextForm.port, 10) || 1883,
+            username: nextForm.username.trim(),
+            include_default_roots: Boolean(nextForm.include_default_roots),
+            extra_roots: nextForm.extra_roots.trim(),
+            extra_topics: nextForm.extra_topics.trim(),
+          };
+          if (!nextForm.username.trim() && !nextForm.password.trim()) {
+            body.password = '';
+          }
+        if (typeof updates.enabled === 'boolean') {
+          body.enabled = updates.enabled;
+        }
+        if (nextForm.password.trim()) {
+          body.password = nextForm.password;
+        }
+        if (nextForm.psk.trim()) {
+          body.psk = nextForm.psk.trim();
+        }
+        const res = await fetch(`${API_BASE}/api/settings/meshtastic-mqtt`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const detail = await res.text().catch(() => '');
+          throw new Error(detail || `HTTP ${res.status}`);
+        }
+        const data = (await res.json()) as MeshMqttSettings;
+        applyMeshMqttSettings(data);
+        if (data.enabled) {
+          setWormholeEnabled(false);
+          setWormholeReadyState(false);
+          setWormholeRnsReady(false);
+          setWormholeRnsDirectReady(false);
+          setWormholeRnsPeers({ active: 0, configured: 0 });
+          setSecureModeCached(false);
+        }
+        const status = data.runtime?.connected
+          ? 'MQTT bridge connected.'
+          : data.enabled
+            ? 'MQTT bridge enabled. Connection may take a few seconds.'
+            : 'MQTT bridge disabled.';
+        setMeshMqttStatusText(status);
+        return { ok: true as const, text: status, data };
+      } catch (err) {
+        const text = err instanceof Error ? err.message : 'MQTT settings update failed';
+        setMeshMqttStatusText(text);
+        return { ok: false as const, text };
+      } finally {
+        setMeshMqttBusy(false);
+      }
+    },
+    [applyMeshMqttSettings, meshMqttForm],
+  );
+
+  const enableMeshMqttBridge = useCallback(async () => {
+    const result = await saveMeshMqttSettings({ enabled: true });
+    if (!result.ok) {
+      throw new Error(result.text);
+    }
+    return result;
+  }, [saveMeshMqttSettings]);
   const dmSendTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamEnabledForSelectedGateRef = useRef(false);
   const displayPublicMeshSender = useCallback(
@@ -345,15 +548,14 @@ export function useMeshChatController({
       if (!sender) return '???';
       if (
         hasPublicLaneIdentity &&
-        publicIdentity?.nodeId &&
         publicMeshAddress &&
-        sender.toLowerCase() === publicIdentity.nodeId.toLowerCase()
+        sender.toLowerCase() === publicMeshAddress.toLowerCase()
       ) {
         return publicMeshAddress.toUpperCase();
       }
       return sender;
     },
-    [hasPublicLaneIdentity, publicIdentity?.nodeId, publicMeshAddress],
+    [hasPublicLaneIdentity, publicMeshAddress],
   );
 
   const openIdentityWizard = useCallback(
@@ -370,6 +572,7 @@ export function useMeshChatController({
 
   useEffect(() => {
     if (!clientHydrated) return;
+    setPublicMeshAddress(readStoredPublicMeshAddress());
     setMeshSessionActive(false);
     setMeshMessages([]);
     setMeshQuickStatus(null);
@@ -524,25 +727,6 @@ export function useMeshChatController({
       alive = false;
     };
   }, []);
-
-  useEffect(() => {
-    let alive = true;
-    const senderId = storedPublicIdentity?.nodeId || '';
-    if (!senderId || !globalThis.crypto?.subtle) {
-      setPublicMeshAddress('');
-      return;
-    }
-    derivePublicMeshAddress(senderId)
-      .then((addr) => {
-        if (alive) setPublicMeshAddress(addr);
-      })
-      .catch(() => {
-        if (alive) setPublicMeshAddress('');
-      });
-    return () => {
-      alive = false;
-    };
-  }, [storedPublicIdentity?.nodeId]);
 
   const flushDmQueue = useCallback(async () => {
     const queue = dmSendQueue.current.splice(0);
@@ -1154,6 +1338,36 @@ export function useMeshChatController({
     const target = publicMeshAddress.toLowerCase();
     return filteredMeshMessages.filter((m) => String(m.to || '').toLowerCase() === target);
   }, [filteredMeshMessages, meshSessionActive, publicMeshAddress]);
+
+  useEffect(() => {
+    if (!expanded || activeTab !== 'meshtastic') return;
+    let alive = true;
+    const tick = async () => {
+      const data = await refreshMeshMqttSettings();
+      if (!alive || !data) return;
+      if (!data.enabled && meshSessionActive) {
+        setMeshQuickStatus({
+          type: 'err',
+          text: 'Public Mesh key is ready, but MQTT is off. Enable MQTT in Settings to join the live public lane.',
+        });
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => {
+      void tick();
+    }, meshMqttEnabled && !meshMqttConnected ? 5_000 : 15_000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [
+    activeTab,
+    expanded,
+    meshMqttConnected,
+    meshMqttEnabled,
+    meshSessionActive,
+    refreshMeshMqttSettings,
+  ]);
 
   // ─── InfoNet Polling ─────────────────────────────────────────────────────
 
@@ -2411,7 +2625,7 @@ export function useMeshChatController({
         ]);
         setGateReplyContext(null);
         } else if (activeTab === 'meshtastic') {
-          if (!meshSessionActive || !publicIdentity || !hasSovereignty()) {
+          if (!meshSessionActive || !publicMeshAddress) {
             setInputValue(msg);
             setLastSendTime(0);
             setSendError(meshSessionActive ? 'public mesh identity needed' : 'meshchat is off');
@@ -2425,8 +2639,20 @@ export function useMeshChatController({
             setBusy(false);
             return;
           }
+          if (!meshMqttEnabled) {
+            setInputValue(msg);
+            setLastSendTime(0);
+            setSendError('mqtt is off');
+            setMeshQuickStatus({
+              type: 'err',
+              text: 'Public Mesh key is ready, but MQTT is off. Open Settings and enable the public broker.',
+            });
+            setMeshView('settings');
+            setTimeout(() => setSendError(''), 4000);
+            setBusy(false);
+            return;
+          }
           const meshDestination = meshDirectTarget.trim() || 'broadcast';
-          const sequence = nextSequence();
           const payload = {
             message: msg,
             destination: meshDestination,
@@ -2444,8 +2670,7 @@ export function useMeshChatController({
             setBusy(false);
             return;
           }
-          const signature = await signEvent('message', publicIdentity.nodeId, sequence, payload);
-          const sendRes = await fetch(`${API_BASE}/api/mesh/send`, {
+          const sendRes = await fetch(`${API_BASE}/api/mesh/meshtastic/send`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -2455,14 +2680,8 @@ export function useMeshChatController({
               priority: 'normal',
               ephemeral: false,
               transport_lock: 'meshtastic',
-              sender_id: publicIdentity.nodeId,
-              node_id: publicIdentity.nodeId,
-              public_key: publicIdentity.publicKey,
-              public_key_algo: getPublicKeyAlgo(),
-              signature,
-              sequence,
-              protocol_version: PROTOCOL_VERSION,
-              credentials: { mesh_region: meshRegion },
+              sender_id: publicMeshAddress,
+              mesh_region: meshRegion,
             }),
           });
         if (!sendRes.ok) {
@@ -2476,15 +2695,7 @@ export function useMeshChatController({
         if (!sendData.ok) {
           setInputValue(msg);
           setLastSendTime(0);
-          if (sendData.detail === 'Invalid signature') {
-            setSendError('public mesh signature failed');
-            openIdentityWizard({
-              type: 'err',
-              text: 'This public mesh identity did not verify. Reset it, recreate it, then retry.',
-            });
-          } else {
-            setSendError(sendData.detail || 'send failed');
-          }
+          setSendError(sendData.detail || 'send failed');
           setTimeout(() => setSendError(''), 4000);
           return;
         }
@@ -3937,6 +4148,7 @@ export function useMeshChatController({
       wormholeReadyState &&
       !selectedGateAccessReady) ||
     (activeTab === 'infonet' && anonymousPublicBlocked) ||
+    (activeTab === 'meshtastic' && (!hasPublicLaneIdentity || !meshMqttEnabled)) ||
     (activeTab === 'dms' &&
       (dmView !== 'chat' ||
         !selectedContact ||
@@ -4003,11 +4215,11 @@ export function useMeshChatController({
       setIdentityWizardStatus(null);
       try {
         await disableWormholeForPublicMesh();
-        const nextIdentity = await generateNodeKeys();
-        const nextAddress = await derivePublicMeshAddress(nextIdentity.nodeId).catch(() => '');
-        const readyAddress = (nextAddress || nextIdentity.nodeId).toUpperCase();
-        setIdentity(nextIdentity);
-        setPublicMeshAddress(nextAddress || nextIdentity.nodeId);
+        const nextAddress = createPublicMeshAddress();
+        await enableMeshMqttBridge();
+        writeStoredPublicMeshAddress(nextAddress);
+        const readyAddress = nextAddress.toUpperCase();
+        setPublicMeshAddress(nextAddress);
         setMeshSessionActive(true);
         setMeshMessages([]);
         setSendError('');
@@ -4038,7 +4250,7 @@ export function useMeshChatController({
         setIdentityWizardBusy(false);
       }
     },
-    [disableWormholeForPublicMesh],
+    [disableWormholeForPublicMesh, enableMeshMqttBridge],
   );
 
   const handleCreatePublicIdentity = useCallback(async () => {
@@ -4059,8 +4271,8 @@ export function useMeshChatController({
     setIdentityWizardStatus(null);
     setMeshQuickStatus(null);
     try {
-      const savedIdentity = getNodeIdentity();
-      if (!savedIdentity || !hasSovereignty()) {
+      const savedAddress = readStoredPublicMeshAddress();
+      if (!savedAddress) {
         const text = 'No saved public mesh key is available. Create a mesh key first.';
         setMeshSessionActive(false);
         setIdentityWizardStatus({ type: 'err', text });
@@ -4068,10 +4280,9 @@ export function useMeshChatController({
         return { ok: false as const, text };
       }
       await disableWormholeForPublicMesh();
-      const nextAddress = await derivePublicMeshAddress(savedIdentity.nodeId).catch(() => '');
-      const readyAddress = (nextAddress || savedIdentity.nodeId).toUpperCase();
-      setIdentity(savedIdentity);
-      setPublicMeshAddress(nextAddress || savedIdentity.nodeId);
+      await enableMeshMqttBridge();
+      const readyAddress = savedAddress.toUpperCase();
+      setPublicMeshAddress(savedAddress);
       setMeshSessionActive(true);
       setMeshMessages([]);
       setSendError('');
@@ -4091,7 +4302,7 @@ export function useMeshChatController({
     } finally {
       setIdentityWizardBusy(false);
     }
-  }, [disableWormholeForPublicMesh]);
+  }, [disableWormholeForPublicMesh, enableMeshMqttBridge]);
 
   const handleReplyToMeshAddress = useCallback((address: string) => {
     const target = String(address || '').trim();
@@ -4127,14 +4338,8 @@ export function useMeshChatController({
     try {
       setMeshSessionActive(false);
       setMeshMessages([]);
-      await clearBrowserIdentityState();
-      setIdentity(null);
+      clearStoredPublicMeshAddress();
       setPublicMeshAddress('');
-      setContacts({});
-      setSelectedContact('');
-      setDmMessages([]);
-      setAccessRequestsState([]);
-      setPendingSentState([]);
       setIdentityWizardStatus({
         type: 'ok',
         text: 'Public mesh identity cleared. Start a fresh one when you are ready.',
@@ -4246,6 +4451,17 @@ export function useMeshChatController({
     setMeshView,
     meshDirectTarget,
     setMeshDirectTarget,
+    meshMqttSettings,
+    meshMqttForm,
+    setMeshMqttForm,
+    meshMqttBusy,
+    meshMqttStatusText,
+    meshMqttEnabled,
+    meshMqttRunning,
+    meshMqttConnected,
+    meshMqttConnectionLabel,
+    saveMeshMqttSettings,
+    refreshMeshMqttSettings,
     // Identity
     identity,
     publicIdentity,

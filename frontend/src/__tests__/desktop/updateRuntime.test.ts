@@ -9,12 +9,12 @@ import {
 } from '@/lib/updateRuntime';
 
 const RELEASE: GitHubLatestRelease = {
-  html_url: 'https://github.com/BigBodyCobain/Shadowbroker/releases/tag/v0.9.7',
+  html_url: 'https://github.com/BigBodyCobain/Shadowbroker/releases/tag/v0.9.75',
   assets: [
-    { name: 'ShadowBroker_0.9.7_x64_en-US.msi', browser_download_url: 'https://example.test/windows.msi' },
-    { name: 'ShadowBroker_0.9.7_x64-setup.exe', browser_download_url: 'https://example.test/windows-setup.exe' },
-    { name: 'ShadowBroker_0.9.7_aarch64.dmg', browser_download_url: 'https://example.test/macos.dmg' },
-    { name: 'ShadowBroker_0.9.7_amd64.AppImage', browser_download_url: 'https://example.test/linux.AppImage' },
+    { name: 'ShadowBroker_0.9.75_x64_en-US.msi', browser_download_url: 'https://example.test/windows.msi' },
+    { name: 'ShadowBroker_0.9.75_x64-setup.exe', browser_download_url: 'https://example.test/windows-setup.exe' },
+    { name: 'ShadowBroker_0.9.75_aarch64.dmg', browser_download_url: 'https://example.test/macos.dmg' },
+    { name: 'ShadowBroker_0.9.75_amd64.AppImage', browser_download_url: 'https://example.test/linux.AppImage' },
   ],
 };
 

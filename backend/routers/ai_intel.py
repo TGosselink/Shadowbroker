@@ -1585,7 +1585,7 @@ async def agent_tool_manifest(request: Request):
 
     return {
         "ok": True,
-        "version": "0.9.7",
+        "version": "0.9.75",
         "access_tier": access_tier,
         "available_commands": available_commands,
         "transport": {
@@ -2221,7 +2221,7 @@ async def api_capabilities(request: Request):
     access_tier = str(get_settings().OPENCLAW_ACCESS_TIER or "restricted").strip().lower()
     return {
         "ok": True,
-        "version": "0.9.7",
+        "version": "0.9.75",
         "auth": {
             "method": "HMAC-SHA256",
             "headers": ["X-SB-Timestamp", "X-SB-Nonce", "X-SB-Signature"],

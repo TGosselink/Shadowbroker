@@ -8,6 +8,7 @@ from typing import Iterable
 # Default subscription roots — US-only to avoid flooding the public broker.
 # Users can opt into additional regions via MESH_MQTT_EXTRA_ROOTS.
 DEFAULT_ROOTS: tuple[str, ...] = ("US",)
+DEFAULT_CHANNEL = "LongFast"
 
 # Every known official region root (for UI dropdowns / manual opt-in).
 ALL_OFFICIAL_ROOTS: tuple[str, ...] = (
@@ -107,6 +108,10 @@ def normalize_topic_filter(value: str) -> str | None:
     return "/".join(parts)
 
 
+def _default_topic_for_root(root: str) -> str:
+    return f"msh/{root}/2/e/{DEFAULT_CHANNEL}/#"
+
+
 def build_subscription_topics(
     extra_roots: str = "",
     extra_topics: str = "",
@@ -119,7 +124,7 @@ def build_subscription_topics(
         # via MESH_MQTT_EXTRA_ROOTS to avoid flooding the public broker.
     roots.extend(root for root in (normalize_root(item) for item in _split_config_values(extra_roots)) if root)
 
-    topics = [f"msh/{root}/#" for root in _dedupe(roots)]
+    topics = [_default_topic_for_root(root) for root in _dedupe(roots)]
     topics.extend(
         topic
         for topic in (
@@ -137,7 +142,7 @@ def known_roots(extra_roots: str = "", include_defaults: bool = True) -> list[st
     for topic in topics:
         if not topic.startswith("msh/") or not topic.endswith("/#"):
             continue
-        root = normalize_root(topic[4:-2])
+        root = normalize_root(parse_topic_metadata(topic)["root"])
         if root:
             roots.append(root)
     return _dedupe(roots)

@@ -114,6 +114,7 @@ export interface Ship {
   source_url?: string;
   last_osint_update?: string;
   desc?: string;
+  trail?: Array<{ lat: number; lng: number; sog?: number; ts?: number } | number[]>;
   // Tracked yacht enrichment
   yacht_alert?: boolean;
   yacht_owner?: string;

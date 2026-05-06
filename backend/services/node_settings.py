@@ -10,7 +10,8 @@ _cache: dict | None = None
 _cache_ts: float = 0.0
 _CACHE_TTL = 5.0
 _DEFAULTS = {
-    "enabled": False,
+    "enabled": True,
+    "operator_disabled": False,
     "timemachine_enabled": False,
 }
 
@@ -35,8 +36,16 @@ def read_node_settings() -> dict:
         except Exception:
             result = {**_DEFAULTS, "updated_at": 0}
         else:
+            operator_disabled = bool(data.get("operator_disabled", False))
+            raw_enabled = data.get("enabled", _DEFAULTS["enabled"])
+            # v0.9.7 initially wrote enabled:false as a default/offline state,
+            # which accidentally blocked InfoNet participation. Treat legacy
+            # false-without-marker as auto-enabled; only an explicit operator
+            # disable should keep the participant sync loop off.
+            enabled = False if operator_disabled else bool(raw_enabled or "operator_disabled" not in data)
             result = {
-                "enabled": bool(data.get("enabled", _DEFAULTS["enabled"])),
+                "enabled": enabled,
+                "operator_disabled": operator_disabled,
                 "timemachine_enabled": bool(data.get("timemachine_enabled", _DEFAULTS["timemachine_enabled"])),
                 "updated_at": _safe_int(data.get("updated_at", 0) or 0),
             }
@@ -48,8 +57,10 @@ def read_node_settings() -> dict:
 def write_node_settings(*, enabled: bool | None = None, timemachine_enabled: bool | None = None) -> dict:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     existing = read_node_settings()
+    next_enabled = bool(existing.get("enabled", _DEFAULTS["enabled"])) if enabled is None else bool(enabled)
     payload = {
-        "enabled": bool(existing.get("enabled", _DEFAULTS["enabled"])) if enabled is None else bool(enabled),
+        "enabled": next_enabled,
+        "operator_disabled": bool(existing.get("operator_disabled", _DEFAULTS["operator_disabled"])) if enabled is None else not next_enabled,
         "timemachine_enabled": bool(existing.get("timemachine_enabled", _DEFAULTS["timemachine_enabled"])) if timemachine_enabled is None else bool(timemachine_enabled),
         "updated_at": int(time.time()),
     }

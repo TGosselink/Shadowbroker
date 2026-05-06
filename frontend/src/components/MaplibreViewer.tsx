@@ -159,7 +159,7 @@ import {
   EarthquakeLabels,
   ThreatMarkers,
 } from '@/components/map/MapMarkers';
-import type { DashboardData, KiwiSDR, MaplibreViewerProps, Scanner, SigintSignal } from '@/types/dashboard';
+import type { DashboardData, Flight, KiwiSDR, MaplibreViewerProps, Scanner, Ship, SigintSignal } from '@/types/dashboard';
 import { useDataKeys } from '@/hooks/useDataStore';
 import { useInterpolation } from '@/components/map/hooks/useInterpolation';
 import { useClusterLabels } from '@/components/map/hooks/useClusterLabels';
@@ -225,6 +225,63 @@ type GeoExtras = {
 type KiwiProps = Partial<KiwiSDR> & GeoExtras;
 type ScannerProps = Partial<Scanner> & GeoExtras;
 type SigintProps = Partial<SigintSignal> & GeoExtras;
+type TrailPoint = { lng: number; lat: number; alt?: number; sog?: number; ts?: number };
+type TrailKind = 'flight' | 'ship';
+
+const FLIGHT_SELECTION_TYPES = new Set([
+  'flight',
+  'private_flight',
+  'military_flight',
+  'private_jet',
+  'tracked_flight',
+]);
+
+function parseTrailPoints(raw: unknown, kind: TrailKind): TrailPoint[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((p): TrailPoint | null => {
+      if (Array.isArray(p)) {
+        const lat = Number(p[0]);
+        const lng = Number(p[1]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+        if (kind === 'ship') {
+          return { lat, lng, sog: Number(p[2]) || 0, ts: Number(p[3]) || 0 };
+        }
+        return { lat, lng, alt: Number(p[2]) || 0, ts: Number(p[3]) || 0 };
+      }
+      if (p && typeof p === 'object') {
+        const point = p as { lat?: number; lng?: number; alt?: number; sog?: number; ts?: number };
+        const lat = Number(point.lat);
+        const lng = Number(point.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+        return {
+          lat,
+          lng,
+          alt: Number(point.alt) || 0,
+          sog: Number(point.sog) || 0,
+          ts: Number(point.ts) || 0,
+        };
+      }
+      return null;
+    })
+    .filter((p): p is TrailPoint => Boolean(p && (p.lat !== 0 || p.lng !== 0)));
+}
+
+function hasKnownRouteName(value?: string | null): boolean {
+  const normalized = String(value || '').trim().toUpperCase();
+  return Boolean(normalized && normalized !== 'UNKNOWN');
+}
+
+function flightHasKnownRoute(entity: ReturnType<typeof findSelectedEntity>, dynamicRoute: DynamicRoute | null): boolean {
+  if (!entity) return false;
+  if (dynamicRoute?.orig_loc || dynamicRoute?.dest_loc) return true;
+  if (!('origin_loc' in entity) && !('origin_name' in entity)) return false;
+  const flight = entity as Flight;
+  return Boolean(
+    (flight.origin_loc && flight.dest_loc)
+      || (hasKnownRouteName(flight.origin_name) && hasKnownRouteName(flight.dest_name)),
+  );
+}
 
 const MAP_EXTRA_DATA_KEYS = [
   'air_quality',
@@ -479,6 +536,7 @@ const MaplibreViewer = ({
   }, [activeLayers.viirs_nightlights, viirsProbeDayKey]);
 
   const [dynamicRoute, setDynamicRoute] = useState<DynamicRoute | null>(null);
+  const [selectedTrailPoints, setSelectedTrailPoints] = useState<TrailPoint[]>([]);
   const prevCallsign = useRef<string | null>(null);
 
   // Oracle region intel for map entity popups
@@ -557,6 +615,7 @@ const MaplibreViewer = ({
 
     if (callsign && callsign !== prevCallsign.current) {
       prevCallsign.current = callsign;
+      setDynamicRoute(null);
       fetch(`${API_BASE}/api/route/${callsign}?lat=${entityLat}&lng=${entityLng}`)
         .then((res) => res.json())
         .then((routeData) => {
@@ -574,6 +633,71 @@ const MaplibreViewer = ({
       isMounted = false;
     };
   }, [selectedEntity, data]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const entity = findSelectedEntity(selectedEntity, data);
+    if (!selectedEntity || !entity) {
+      setSelectedTrailPoints([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const isFlight = FLIGHT_SELECTION_TYPES.has(selectedEntity.type);
+    const isShip = selectedEntity.type === 'ship';
+    if (!isFlight && !isShip) {
+      setSelectedTrailPoints([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (isFlight && flightHasKnownRoute(entity, dynamicRoute)) {
+      setSelectedTrailPoints([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const kind: TrailKind = isShip ? 'ship' : 'flight';
+    const fallback = parseTrailPoints((entity as Flight | Ship).trail, kind);
+    if (fallback.length >= 2) {
+      setSelectedTrailPoints(fallback);
+    } else {
+      setSelectedTrailPoints([]);
+    }
+
+    const trailId = String(selectedEntity.id || '').trim();
+    if (!trailId) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (isShip && !/^\d+$/.test(trailId)) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const endpoint = isShip
+      ? `${API_BASE}/api/trail/ship/${encodeURIComponent(trailId)}`
+      : `${API_BASE}/api/trail/flight/${encodeURIComponent(trailId)}`;
+    fetch(endpoint)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => {
+        if (cancelled || !payload) return;
+        const points = parseTrailPoints(payload.trail, kind);
+        setSelectedTrailPoints(points.length >= 2 ? points : fallback);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedTrailPoints(fallback);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEntity, data, dynamicRoute]);
 
   // Fetch oracle region intel for entity popups
   useEffect(() => {
@@ -1349,27 +1473,29 @@ const MaplibreViewer = ({
     return { type: 'FeatureCollection' as const, features };
   }, [selectedEntity, data, dynamicRoute, getSelectedEntityLiveCoords, interpTick]);
 
-  // Trail history GeoJSON: shows where the SELECTED aircraft has been
+  // Trail history GeoJSON: shows where the selected unknown-route aircraft or vessel has been.
   const trailGeoJSON = useMemo(() => {
     void interpTick;
     const entity = findSelectedEntity(selectedEntity, data);
-    if (!entity || !('trail' in entity) || !entity.trail || entity.trail.length < 2) return null;
+    if (!entity || selectedTrailPoints.length < 2) return null;
+    if (selectedEntity && FLIGHT_SELECTION_TYPES.has(selectedEntity.type) && flightHasKnownRoute(entity, dynamicRoute)) {
+      return null;
+    }
 
-    // Parse trail points — backend sends [lat, lng, alt, ts] arrays
-    type TrailPt = { lng: number; lat: number; alt: number; ts: number };
-    const points: TrailPt[] = (
-      entity.trail as Array<{ lat?: number; lng?: number; alt?: number; ts?: number } | number[]>
-    ).map((p) => {
-      if (Array.isArray(p)) {
-        return { lat: p[0] as number, lng: p[1] as number, alt: (p[2] as number) || 0, ts: (p[3] as number) || 0 };
-      }
-      return { lat: p.lat ?? 0, lng: p.lng ?? 0, alt: p.alt ?? 0, ts: p.ts ?? 0 };
-    }).filter((p) => p.lat !== 0 || p.lng !== 0);
+    // Trails are loaded only for the selected asset to avoid open-map clutter.
+    const isShipTrail = selectedEntity?.type === 'ship';
+    const points = [...selectedTrailPoints];
 
     const currentLoc = getSelectedEntityLiveCoords(entity);
     if (currentLoc && points.length > 0) {
       const lastPt = points[points.length - 1];
-      points.push({ lng: currentLoc[0], lat: currentLoc[1], alt: lastPt.alt, ts: Date.now() / 1000 });
+      points.push({
+        lng: currentLoc[0],
+        lat: currentLoc[1],
+        alt: lastPt.alt,
+        sog: lastPt.sog,
+        ts: Date.now() / 1000,
+      });
     }
 
     if (points.length < 2) return null;
@@ -1394,7 +1520,7 @@ const MaplibreViewer = ({
         type: 'Feature' as const,
         properties: {
           type: 'trail',
-          color: altToColor((a.alt + b.alt) / 2),
+          color: isShipTrail ? '#22d3ee' : altToColor(((a.alt ?? 0) + (b.alt ?? 0)) / 2),
           opacity: 0.4 + progress * 0.5, // older segments more transparent
           segIndex: i,
         },
@@ -1406,7 +1532,7 @@ const MaplibreViewer = ({
     }
 
     return { type: 'FeatureCollection' as const, features };
-  }, [selectedEntity, data, getSelectedEntityLiveCoords, interpTick]);
+  }, [selectedEntity, data, selectedTrailPoints, dynamicRoute, getSelectedEntityLiveCoords, interpTick]);
 
   // Predictive vector GeoJSON: dotted line projecting ~5 min ahead based on heading + speed
   // Skip when entity has a known route (origin+dest) — the route line already shows where it's going

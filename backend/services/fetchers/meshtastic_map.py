@@ -182,7 +182,7 @@ def fetch_meshtastic_nodes():
         callsign = str(getattr(get_settings(), "MESHTASTIC_OPERATOR_CALLSIGN", "") or "").strip()
     except Exception:
         callsign = ""
-    ua_base = "ShadowBroker-OSINT/0.9.7 (+https://github.com/BigBodyCobain/Shadowbroker; contact: bigbodycobain@gmail.com; 24h polling)"
+    ua_base = "ShadowBroker-OSINT/0.9.75 (+https://github.com/BigBodyCobain/Shadowbroker; contact: bigbodycobain@gmail.com; 24h polling)"
     user_agent = f"{ua_base}; node={callsign}" if callsign else ua_base
 
     try:

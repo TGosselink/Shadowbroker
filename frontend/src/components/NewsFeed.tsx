@@ -100,6 +100,7 @@ const AIRCRAFT_WIKI: Record<string, string> = {
     PA46: 'Piper PA-46 Malibu', BE36: 'Beechcraft Bonanza', BE9L: 'Beechcraft King Air',
     BE20: 'Beechcraft Super King Air', B350: 'Beechcraft King Air 350', PC12: 'Pilatus PC-12',
     PC24: 'Pilatus PC-24', TBM7: 'Daher TBM', TBM8: 'Daher TBM', TBM9: 'Daher TBM',
+    PIVI: 'Pipistrel Virus',
     // Helicopters
     R44: 'Robinson R44', R22: 'Robinson R22', R66: 'Robinson R66',
     B06: 'Bell 206', B407: 'Bell 407', B412: 'Bell 412',
@@ -196,12 +197,17 @@ function resolveAcTypeWiki(acType: string): string | null {
     return null;
 }
 
+function resolveAircraftWikiTitle(model: string | undefined): string | null {
+    if (!model) return null;
+    return AIRCRAFT_WIKI[model] || resolveAcTypeWiki(model);
+}
+
 // Module-level cache for Wikipedia thumbnails (persists across re-renders)
 const _wikiThumbCache: Record<string, { url: string | null; loading: boolean }> = {};
 
 function useAircraftImage(model: string | undefined): { imgUrl: string | null; wikiUrl: string | null; loading: boolean } {
     const [, forceUpdate] = useState(0);
-    const wikiTitle = model ? AIRCRAFT_WIKI[model] : undefined;
+    const wikiTitle = resolveAircraftWikiTitle(model) || undefined;
     const wikiUrl = wikiTitle ? `https://en.wikipedia.org/wiki/${wikiTitle.replace(/ /g, '_')}` : null;
 
     useEffect(() => {
@@ -235,6 +241,162 @@ const VESSEL_TYPE_WIKI: Record<string, string> = {
     'yacht': 'https://en.wikipedia.org/wiki/Superyacht',
     'military_vessel': 'https://en.wikipedia.org/wiki/Warship',
 };
+
+type FlightTrailPoint = { lat?: number; lng?: number; alt?: number; ts?: number } | number[];
+
+function readTrailTimestamp(point: FlightTrailPoint): number | null {
+    if (Array.isArray(point)) {
+        const ts = Number(point[3]);
+        return Number.isFinite(ts) && ts > 0 ? ts : null;
+    }
+    const ts = Number(point?.ts);
+    return Number.isFinite(ts) && ts > 0 ? ts : null;
+}
+
+function readTrailLatLng(point: FlightTrailPoint): { lat: number; lng: number } | null {
+    const lat = Number(Array.isArray(point) ? point[0] : point?.lat);
+    const lng = Number(Array.isArray(point) ? point[1] : point?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+}
+
+function distanceNm(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+    const toRad = (deg: number) => (deg * Math.PI) / 180;
+    const earthRadiusNm = 3440.065;
+    const dLat = toRad(b.lat - a.lat);
+    const dLng = toRad(b.lng - a.lng);
+    const lat1 = toRad(a.lat);
+    const lat2 = toRad(b.lat);
+    const h =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+    return 2 * earthRadiusNm * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function formatObservedDuration(hours: number): string {
+    const minutes = Math.max(1, Math.round(hours * 60));
+    if (minutes < 60) return `${minutes} min`;
+    const wholeHours = Math.floor(minutes / 60);
+    const remainder = minutes % 60;
+    return remainder ? `${wholeHours}h ${remainder}m` : `${wholeHours}h`;
+}
+
+function estimateObservedEmissions(flight: any): {
+    fuelGallons: number;
+    co2Kg: number;
+    durationLabel: string;
+    distanceLabel: string | null;
+    basisLabel: string;
+} | null {
+    const fuelGph = Number(flight?.emissions?.fuel_gph);
+    const co2KgPerHour = Number(flight?.emissions?.co2_kg_per_hour);
+    const trail = Array.isArray(flight?.trail) ? (flight.trail as FlightTrailPoint[]) : [];
+    if (!Number.isFinite(fuelGph) || !Number.isFinite(co2KgPerHour)) {
+        return null;
+    }
+
+    const timestamps = trail
+        .map(readTrailTimestamp)
+        .filter((ts): ts is number => ts !== null)
+        .sort((a, b) => a - b);
+    if (timestamps.length >= 2) {
+        const elapsedHours = (timestamps[timestamps.length - 1] - timestamps[0]) / 3600;
+        if (Number.isFinite(elapsedHours) && elapsedHours >= 5 / 60) {
+            let distance = 0;
+            let previous: { lat: number; lng: number } | null = null;
+            for (const point of trail) {
+                const current = readTrailLatLng(point);
+                if (previous && current) distance += distanceNm(previous, current);
+                if (current) previous = current;
+            }
+
+            return {
+                fuelGallons: Math.round(fuelGph * elapsedHours),
+                co2Kg: Math.round(co2KgPerHour * elapsedHours),
+                durationLabel: formatObservedDuration(elapsedHours),
+                distanceLabel: distance > 1 ? `${Math.round(distance).toLocaleString()} nm` : null,
+                basisLabel: 'trail history',
+            };
+        }
+    }
+
+    const origin = Array.isArray(flight?.origin_loc)
+        ? { lng: Number(flight.origin_loc[0]), lat: Number(flight.origin_loc[1]) }
+        : null;
+    const current = { lat: Number(flight?.lat), lng: Number(flight?.lng) };
+    const speedKnots = Number(flight?.speed_knots);
+    if (
+        origin &&
+        Number.isFinite(origin.lat) &&
+        Number.isFinite(origin.lng) &&
+        Number.isFinite(current.lat) &&
+        Number.isFinite(current.lng) &&
+        Number.isFinite(speedKnots) &&
+        speedKnots > 50
+    ) {
+        const flownNm = distanceNm(origin, current);
+        const elapsedHours = flownNm / speedKnots;
+        if (Number.isFinite(elapsedHours) && elapsedHours >= 5 / 60 && elapsedHours <= 18) {
+            return {
+                fuelGallons: Math.round(fuelGph * elapsedHours),
+                co2Kg: Math.round(co2KgPerHour * elapsedHours),
+                durationLabel: formatObservedDuration(elapsedHours),
+                distanceLabel: `${Math.round(flownNm).toLocaleString()} nm`,
+                basisLabel: 'route progress',
+            };
+        }
+    }
+
+    return null;
+}
+
+function EmissionsEstimateBlock({ flight }: { flight: any }) {
+    const observed = estimateObservedEmissions(flight);
+    const emissions = flight?.emissions;
+    const context = observed
+        ? `${observed.durationLabel} ${observed.basisLabel}${observed.distanceLabel ? ` / ${observed.distanceLabel}` : ''}`
+        : emissions
+            ? 'Rate only until enough trail history accumulates'
+            : null;
+
+    return (
+        <div className="border-b border-[var(--border-primary)] pb-2">
+            <span className="text-[var(--text-muted)] text-[10px] block mb-1.5">EMISSIONS ESTIMATE</span>
+            <div className="flex gap-3">
+                <div className="flex-1 bg-[var(--bg-primary)]/50 border border-[var(--border-primary)] px-2 py-1.5">
+                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">
+                        {observed ? 'FUEL BURNED' : 'FUEL RATE'}
+                    </div>
+                    <div className="text-xs font-bold text-orange-400">
+                        {observed ? (
+                            <>{observed.fuelGallons.toLocaleString()} <span className="text-[11px] text-[var(--text-muted)] font-normal">GAL</span></>
+                        ) : emissions ? (
+                            <>{emissions.fuel_gph} <span className="text-[11px] text-[var(--text-muted)] font-normal">GPH</span></>
+                        ) : 'UNKNOWN'}
+                    </div>
+                </div>
+                <div className="flex-1 bg-[var(--bg-primary)]/50 border border-[var(--border-primary)] px-2 py-1.5">
+                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">
+                        {observed ? 'CO2 PRODUCED' : 'CO2 RATE'}
+                    </div>
+                    <div className="text-xs font-bold text-red-400">
+                        {observed ? (
+                            <>{observed.co2Kg.toLocaleString()} <span className="text-[11px] text-[var(--text-muted)] font-normal">KG</span></>
+                        ) : emissions ? (
+                            <>{emissions.co2_kg_per_hour.toLocaleString()} <span className="text-[11px] text-[var(--text-muted)] font-normal">KG/HR</span></>
+                        ) : 'UNKNOWN'}
+                    </div>
+                </div>
+            </div>
+            {context && (
+                <div className="mt-1.5 text-[10px] text-[var(--text-muted)] leading-relaxed">
+                    {context}
+                    {observed && emissions ? ` - estimated from ${emissions.fuel_gph} GPH model rate.` : ''}
+                </div>
+            )}
+        </div>
+    );
+}
 
 function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, onArticleClick }: { selectedEntity?: SelectedEntity | null, regionDossier?: RegionDossier | null, regionDossierLoading?: boolean, onArticleClick?: (idx: number, lat?: number, lng?: number, title?: string) => void }) {
     const data = useDataKeys([
@@ -277,12 +439,17 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
     const selectedFlightModel = (() => {
         if (!selectedEntity) return undefined;
         const { type, id } = selectedEntity;
-        let flight: any = null;
-        if (type === 'flight') flight = data?.commercial_flights?.[id as number];
-        else if (type === 'private_flight') flight = data?.private_flights?.[id as number];
-        else if (type === 'private_jet') flight = data?.private_jets?.[id as number];
-        else if (type === 'military_flight') flight = data?.military_flights?.[id as number];
-        else if (type === 'tracked_flight') flight = data?.tracked_flights?.[id as number];
+        const findByIdOrIndex = (flights?: Array<{ icao24?: string; model?: string }>) => {
+            if (!flights) return null;
+            if (typeof id === 'number') return flights[id] || null;
+            return flights.find((flight) => flight.icao24 === id) || null;
+        };
+        let flight: { model?: string } | null = null;
+        if (type === 'flight') flight = findByIdOrIndex(data?.commercial_flights);
+        else if (type === 'private_flight') flight = findByIdOrIndex(data?.private_flights);
+        else if (type === 'private_jet') flight = findByIdOrIndex(data?.private_jets);
+        else if (type === 'military_flight') flight = findByIdOrIndex(data?.military_flights);
+        else if (type === 'tracked_flight') flight = findByIdOrIndex(data?.tracked_flights);
         return flight?.model;
     })();
     const { imgUrl: aircraftImgUrl, wikiUrl: aircraftWikiUrl, loading: aircraftImgLoading } = useAircraftImage(selectedFlightModel);
@@ -684,19 +851,7 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
                                 <span className={`text-xs font-bold ${flight.squawk === '7700' ? 'text-red-400 animate-pulse' : flight.squawk === '7600' ? 'text-yellow-400' : 'text-[var(--text-primary)]'}`}>{flight.squawk}{flight.squawk === '7700' ? ' ⚠ EMERGENCY' : flight.squawk === '7600' ? ' COMMS LOST' : ''}</span>
                             </div>
                         )}
-                        <div className="border-b border-[var(--border-primary)] pb-2">
-                            <span className="text-[var(--text-muted)] text-[10px] block mb-1.5">EMISSIONS ESTIMATE</span>
-                            <div className="flex gap-3">
-                                <div className="flex-1 bg-[var(--bg-primary)]/50 border border-[var(--border-primary)] px-2 py-1.5">
-                                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">FUEL BURN</div>
-                                    <div className="text-xs font-bold text-orange-400">{flight.emissions ? <>{flight.emissions.fuel_gph} <span className="text-[11px] text-[var(--text-muted)] font-normal">GPH</span></> : 'UNKNOWN'}</div>
-                                </div>
-                                <div className="flex-1 bg-[var(--bg-primary)]/50 border border-[var(--border-primary)] px-2 py-1.5">
-                                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">CO2 OUTPUT</div>
-                                    <div className="text-xs font-bold text-red-400">{flight.emissions ? <>{flight.emissions.co2_kg_per_hour.toLocaleString()} <span className="text-[11px] text-[var(--text-muted)] font-normal">KG/HR</span></> : 'UNKNOWN'}</div>
-                                </div>
-                            </div>
-                        </div>
+                        <EmissionsEstimateBlock flight={flight} />
                         {flight.alert_link && (
                             <div className="flex justify-between items-center border-b border-[var(--border-primary)] pb-2">
                                 <span className="text-[var(--text-muted)] text-[10px]">REFERENCE</span>
@@ -750,6 +905,12 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
         if (flight) {
             const callsign = flight.callsign || "UNKNOWN";
             let airline = "UNKNOWN";
+            const isPrivateFlight = selectedEntity.type === 'private_flight' || selectedEntity.type === 'private_jet';
+            const aircraftWikiTitle = resolveAircraftWikiTitle(flight.model);
+            const aircraftModelWikiUrl = aircraftWikiTitle
+                ? `https://en.wikipedia.org/wiki/${aircraftWikiTitle.replace(/ /g, '_')}`
+                : null;
+            const showModelWiki = isPrivateFlight || selectedEntity.type === 'military_flight';
 
             if (selectedEntity.type === 'military_flight') {
                 const mil = flight as import('@/types/dashboard').MilitaryFlight;
@@ -798,7 +959,7 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
                     <div className="p-4 flex flex-col gap-3">
                         <div className="flex justify-between items-center border-b border-[var(--border-primary)] pb-2">
                             <span className="text-[var(--text-muted)] text-[10px]">OPERATOR</span>
-                            {selectedEntity.type !== 'military_flight' && airline && airline !== 'COMMERCIAL FLIGHT' && airline !== 'UNKNOWN' ? (
+                            {!isPrivateFlight && selectedEntity.type !== 'military_flight' && airline && airline !== 'COMMERCIAL FLIGHT' && airline !== 'UNKNOWN' ? (
                                 <a
                                     href={`https://en.wikipedia.org/wiki/${encodeURIComponent(airline.replace(/ /g, '_'))}`}
                                     target="_blank"
@@ -812,7 +973,7 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
                             )}
                         </div>
                         {/* Commercial: Airline company Wikipedia image */}
-                        {selectedEntity.type !== 'military_flight' && airline && airline !== 'COMMERCIAL FLIGHT' && airline !== 'UNKNOWN' && (
+                        {!isPrivateFlight && selectedEntity.type !== 'military_flight' && airline && airline !== 'COMMERCIAL FLIGHT' && airline !== 'UNKNOWN' && (
                             <div className="border-b border-[var(--border-primary)] pb-2">
                                 <WikiImage
                                     wikiUrl={`https://en.wikipedia.org/wiki/${encodeURIComponent(airline.replace(/ /g, '_'))}`}
@@ -828,7 +989,18 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
                         </div>
                         <div className="flex justify-between items-center border-b border-[var(--border-primary)] pb-2">
                             <span className="text-[var(--text-muted)] text-[10px]">AIRCRAFT MODEL</span>
-                            <span className="text-[var(--text-primary)] text-xs font-bold">{flight.model || "UNKNOWN"}</span>
+                            {showModelWiki && aircraftModelWikiUrl ? (
+                                <a
+                                    href={aircraftModelWikiUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-xs font-bold text-cyan-400 hover:text-cyan-300 underline"
+                                >
+                                    {aircraftWikiTitle || flight.model}
+                                </a>
+                            ) : (
+                                <span className="text-[var(--text-primary)] text-xs font-bold">{flight.model || "UNKNOWN"}</span>
+                            )}
                         </div>
                         {/* Military: Aircraft model Wikipedia image (gold accent) */}
                         {selectedEntity.type === 'military_flight' && (() => {
@@ -878,8 +1050,19 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
                             }
                             return null;
                         })()}
+                        {/* Private/GA: aircraft model Wikipedia image as the primary visual */}
+                        {isPrivateFlight && aircraftModelWikiUrl && (
+                            <div className="border-b border-[var(--border-primary)] pb-3">
+                                <WikiImage
+                                    wikiUrl={aircraftModelWikiUrl}
+                                    label={aircraftWikiTitle || flight.model}
+                                    maxH="max-h-36"
+                                    accent="hover:border-purple-400/60"
+                                />
+                            </div>
+                        )}
                         {/* Non-military: Aircraft model photo (secondary, below airline image) */}
-                        {selectedEntity.type !== 'military_flight' && (aircraftImgUrl || aircraftImgLoading || aircraftWikiUrl) && (
+                        {!isPrivateFlight && selectedEntity.type !== 'military_flight' && selectedEntity.type !== 'flight' && (aircraftImgUrl || aircraftImgLoading || aircraftWikiUrl) && (
                             <div className="border-b border-[var(--border-primary)] pb-3">
                                 {aircraftImgLoading && (
                                     <div className="w-full h-24 bg-[var(--bg-tertiary)]/60" />
@@ -924,19 +1107,7 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
                             <span className="text-[var(--text-muted)] text-[10px]">ROUTE</span>
                             <span className="text-cyan-400 text-xs font-bold">{flight.origin_name !== "UNKNOWN" ? `[${flight.origin_name}] → [${flight.dest_name}]` : "UNKNOWN"}</span>
                         </div>
-                        <div className="border-b border-[var(--border-primary)] pb-2">
-                            <span className="text-[var(--text-muted)] text-[10px] block mb-1.5">EMISSIONS ESTIMATE</span>
-                            <div className="flex gap-3">
-                                <div className="flex-1 bg-[var(--bg-primary)]/50 border border-[var(--border-primary)] px-2 py-1.5">
-                                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">FUEL BURN</div>
-                                    <div className="text-xs font-bold text-orange-400">{flight.emissions ? <>{flight.emissions.fuel_gph} <span className="text-[11px] text-[var(--text-muted)] font-normal">GPH</span></> : 'UNKNOWN'}</div>
-                                </div>
-                                <div className="flex-1 bg-[var(--bg-primary)]/50 border border-[var(--border-primary)] px-2 py-1.5">
-                                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">CO2 OUTPUT</div>
-                                    <div className="text-xs font-bold text-red-400">{flight.emissions ? <>{flight.emissions.co2_kg_per_hour.toLocaleString()} <span className="text-[11px] text-[var(--text-muted)] font-normal">KG/HR</span></> : 'UNKNOWN'}</div>
-                                </div>
-                            </div>
-                        </div>
+                        <EmissionsEstimateBlock flight={flight} />
                         {flight.icao24 && (
                             <div className="flex justify-between items-center border-b border-[var(--border-primary)] pb-2">
                                 <span className="text-[var(--text-muted)] text-[10px]">FLIGHT RECORD</span>

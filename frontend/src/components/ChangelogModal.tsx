@@ -20,11 +20,23 @@ import {
   Heart,
 } from 'lucide-react';
 
-const CURRENT_VERSION = '0.9.7';
+const CURRENT_VERSION = '0.9.75';
 const STORAGE_KEY = `shadowbroker_changelog_v${CURRENT_VERSION}`;
-const RELEASE_TITLE = 'Agentic AI Channel + InfoNet Decentralized Intelligence';
+const RELEASE_TITLE = 'Onboarding, Live Feeds, Mesh, and Agent Hardening';
 
 const HEADLINE_FEATURES = [
+  {
+    icon: <Bot size={20} className="text-purple-400" />,
+    accent: 'purple' as const,
+    title: 'Agentic onboarding for OpenClaw-compatible agents',
+    subtitle: 'First-time setup now includes local/direct agent connection, access-tier selection, copyable HMAC setup, and optional Tor hidden-service prep.',
+    details: [
+      'The onboarding flow can generate the local agent connection bundle through the existing HMAC API, point agents at /api/ai/tools, and let operators choose restricted read-only or full write access before connecting an agent.',
+      'Remote mode is labeled honestly: .onion exposes the signed HTTP agent API over Tor. Wormhole/MLS is not claimed as the current agent command transport.',
+      'The setup copy works for OpenClaw, Hermes, or any custom agent that implements the documented HMAC request contract.',
+    ],
+    callToAction: 'OPEN FIRST-TIME SETUP -> AI AGENT',
+  },
   {
     icon: <Bot size={20} className="text-purple-400" />,
     accent: 'purple' as const,
@@ -53,6 +65,26 @@ const HEADLINE_FEATURES = [
 ];
 
 const NEW_FEATURES = [
+  {
+    icon: <Clock size={18} className="text-cyan-400" />,
+    title: 'Startup and Feed Responsiveness Pass',
+    desc: 'Map-critical feeds now lean on startup caches and priority preload behavior so the dashboard can paint before heavyweight synthesis jobs finish.',
+  },
+  {
+    icon: <Network size={18} className="text-green-400" />,
+    title: 'MeshChat MQTT Settings',
+    desc: 'Public MeshChat stays opt-in and now has an in-panel settings lane for broker, port, username, password, and channel PSK while remaining separated from Wormhole/private mode.',
+  },
+  {
+    icon: <Plane size={18} className="text-cyan-400" />,
+    title: 'Selected Entity Trails',
+    desc: 'Flight and vessel trails are drawn only for selected assets, reducing global clutter while still exposing movement history for unknown-route entities.',
+  },
+  {
+    icon: <Plane size={18} className="text-amber-400" />,
+    title: 'Aircraft Detail Cards',
+    desc: 'Commercial aircraft stay airline-first, while private and general aviation aircraft can show model-focused Wiki context and imagery when available.',
+  },
   {
     icon: <Cpu size={18} className="text-purple-400" />,
     title: 'AI Batch Command Channel',
@@ -101,6 +133,10 @@ const NEW_FEATURES = [
 ];
 
 const BUG_FIXES = [
+  'Docker proxy and backend port handling hardened so changing the host backend port does not require changing the internal service contract.',
+  'Global Threat Intercept and live-data startup paths no longer wait on slow-tier synthesis before cached data can paint the UI.',
+  'MeshChat and Infonet statuses now separate public MQTT participation, private Wormhole mode, and local node bootstrap so the UI does not imply the wrong connection state.',
+  'Commercial aircraft detail cards no longer show a confusing model image alongside the airline card.',
   'Sovereign Shell adaptive polling — voting and challenge windows refresh every 8 seconds while active, every 30 to 60 seconds when idle. Voting feels live without a websocket layer.',
   'Per-row write actions (petitions, upgrades, disputes) hold isolated submission state so concurrent forms no longer share a single in-flight slot.',
   'Verbatim diagnostic surfacing on every write button. The backend reason text is always shown on rejection — no opaque "denied" toasts.',

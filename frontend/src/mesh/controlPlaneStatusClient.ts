@@ -81,7 +81,7 @@ export interface NodeSettingsSnapshot {
 
 export const DEFAULT_INFONET_SEED_URL = 'https://node.shadowbroker.info';
 
-const CACHE_TTL_MS = 15000;
+const CACHE_TTL_MS = 5000;
 
 type CacheEntry<T> = {
   value: T;

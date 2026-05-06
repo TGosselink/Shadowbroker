@@ -500,6 +500,7 @@ const SettingsPanel = React.memo(function SettingsPanel({
   // stored server-side, and never returned to the browser.
   const [apis, setApis] = useState<ApiEntry[]>([]);
   const [apiKeyInputs, setApiKeyInputs] = useState<Record<string, string>>({});
+  const [apiKeyEditing, setApiKeyEditing] = useState<Record<string, boolean>>({});
   const [apiKeySaving, setApiKeySaving] = useState<string | null>(null);
   const [apiKeyMsg, setApiKeyMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
@@ -573,6 +574,7 @@ const SettingsPanel = React.memo(function SettingsPanel({
         if (result.keys) setApis(result.keys);
         if (result.env) setEnvMeta(result.env);
         setApiKeyInputs((prev) => ({ ...prev, [envKey]: '' }));
+        setApiKeyEditing((prev) => ({ ...prev, [envKey]: false }));
         setApiKeyMsg({ type: 'ok', text: `${envKey} saved locally. Restart or refresh feeds to use it.` });
       } catch (e) {
         const message = e instanceof Error ? e.message : 'Could not save API key';
@@ -2215,6 +2217,10 @@ const SettingsPanel = React.memo(function SettingsPanel({
                       aircraft and vessel feeds.
                     </p>
                   </div>
+                  <div className="pl-5 text-[12px] font-mono text-cyan-200/80 leading-relaxed">
+                    Configured keys stay hidden for shared dashboards. Unlock operator tools, then
+                    use ROTATE only when you intentionally want to replace a working credential.
+                  </div>
                   {envMeta && (
                     <div className="pl-5 text-[12px] font-mono text-[var(--text-muted)] leading-relaxed space-y-0.5">
                       <div>
@@ -2344,17 +2350,53 @@ const SettingsPanel = React.memo(function SettingsPanel({
                                   {api.has_key && (
                                     <div className="mt-2 space-y-2 text-[12px] font-mono">
                                       {api.is_set ? (
-                                        <div className="flex items-center gap-2">
-                                          <span className="px-2 py-0.5 border border-green-500/40 bg-green-950/20 text-green-300 tracking-wider">
-                                            CONFIGURED
-                                          </span>
-                                          <span className="text-[var(--text-muted)]">
-                                            edit{' '}
-                                            <span className="text-cyan-300 select-all break-all">
-                                              {api.env_key}
-                                            </span>{' '}
-                                            Enter a replacement below if you need to rotate it.
-                                          </span>
+                                        <div className="space-y-2">
+                                          <div className="flex items-start justify-between gap-2">
+                                            <div className="min-w-0 flex items-center gap-2">
+                                              <span className="px-2 py-0.5 border border-green-500/40 bg-green-950/20 text-green-300 tracking-wider">
+                                                CONFIGURED
+                                              </span>
+                                              <span className="text-[var(--text-muted)] leading-relaxed">
+                                                Secret hidden. Stored write-only on this backend as{' '}
+                                                <span className="text-cyan-300 select-all break-all">
+                                                  {api.env_key}
+                                                </span>
+                                                .
+                                              </span>
+                                            </div>
+                                            {api.env_key && (
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  if (!(nativeProtected || adminSessionReady)) {
+                                                    setApiKeyMsg({
+                                                      type: 'err',
+                                                      text: 'Unlock operator tools before rotating a configured key.',
+                                                    });
+                                                    return;
+                                                  }
+                                                  setApiKeyMsg(null);
+                                                  setApiKeyEditing((prev) => ({
+                                                    ...prev,
+                                                    [api.env_key as string]: !prev[api.env_key as string],
+                                                  }));
+                                                }}
+                                                className={`shrink-0 px-2 py-1 border text-[11px] tracking-widest transition-colors ${
+                                                  nativeProtected || adminSessionReady
+                                                    ? 'border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/10'
+                                                    : 'border-[var(--border-primary)] text-[var(--text-muted)] hover:border-yellow-500/30 hover:text-yellow-300/80'
+                                                }`}
+                                              >
+                                                {apiKeyEditing[api.env_key] ? 'CANCEL' : 'ROTATE'}
+                                              </button>
+                                            )}
+                                          </div>
+                                          {!(nativeProtected || adminSessionReady) && (
+                                            <div className="text-[11px] text-yellow-300/70 leading-relaxed">
+                                              Operator tools are locked. Viewers can see source status
+                                              but cannot replace saved credentials.
+                                            </div>
+                                          )}
                                         </div>
                                       ) : (
                                         <div className="flex items-center gap-2">
@@ -2366,40 +2408,42 @@ const SettingsPanel = React.memo(function SettingsPanel({
                                           </span>
                                         </div>
                                       )}
-                                      <div className="flex items-center gap-2">
-                                        <input
-                                          type="password"
-                                          value={api.env_key ? apiKeyInputs[api.env_key] || '' : ''}
-                                          onChange={(event) => {
-                                            if (!api.env_key) return;
-                                            setApiKeyInputs((prev) => ({
-                                              ...prev,
-                                              [api.env_key as string]: event.target.value,
-                                            }));
-                                          }}
-                                          placeholder={
-                                            api.is_set
-                                              ? 'Enter replacement key...'
-                                              : `Enter ${api.env_key}...`
-                                          }
-                                          className="min-w-0 flex-1 bg-[var(--bg-primary)] border border-[var(--border-primary)] px-2 py-1.5 text-sm text-[var(--text-primary)] outline-none focus:border-cyan-500/70 placeholder:text-[var(--text-muted)]/50"
-                                          autoComplete="off"
-                                        />
-                                        <button
-                                          onClick={() => void saveApiKey(api.env_key)}
-                                          disabled={
-                                            !api.env_key ||
-                                            apiKeySaving === api.env_key ||
-                                            !String(
-                                              api.env_key ? apiKeyInputs[api.env_key] || '' : '',
-                                            ).trim()
-                                          }
-                                          className="h-8 px-3 border border-cyan-500/40 bg-cyan-950/20 text-cyan-300 hover:bg-cyan-500/15 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 tracking-widest"
-                                        >
-                                          <Save size={12} />
-                                          {apiKeySaving === api.env_key ? 'SAVING' : 'SAVE'}
-                                        </button>
-                                      </div>
+                                      {(!api.is_set || (api.env_key && apiKeyEditing[api.env_key])) && (
+                                        <div className="flex items-center gap-2">
+                                          <input
+                                            type="password"
+                                            value={api.env_key ? apiKeyInputs[api.env_key] || '' : ''}
+                                            onChange={(event) => {
+                                              if (!api.env_key) return;
+                                              setApiKeyInputs((prev) => ({
+                                                ...prev,
+                                                [api.env_key as string]: event.target.value,
+                                              }));
+                                            }}
+                                            placeholder={
+                                              api.is_set
+                                                ? 'Enter replacement key...'
+                                                : `Enter ${api.env_key}...`
+                                            }
+                                            className="min-w-0 flex-1 bg-[var(--bg-primary)] border border-[var(--border-primary)] px-2 py-1.5 text-sm text-[var(--text-primary)] outline-none focus:border-cyan-500/70 placeholder:text-[var(--text-muted)]/50"
+                                            autoComplete="off"
+                                          />
+                                          <button
+                                            onClick={() => void saveApiKey(api.env_key)}
+                                            disabled={
+                                              !api.env_key ||
+                                              apiKeySaving === api.env_key ||
+                                              !String(
+                                                api.env_key ? apiKeyInputs[api.env_key] || '' : '',
+                                              ).trim()
+                                            }
+                                            className="h-8 px-3 border border-cyan-500/40 bg-cyan-950/20 text-cyan-300 hover:bg-cyan-500/15 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 tracking-widest"
+                                          >
+                                            <Save size={12} />
+                                            {apiKeySaving === api.env_key ? 'SAVING' : 'SAVE'}
+                                          </button>
+                                        </div>
+                                      )}
                                     </div>
                                   )}
                                 </div>
@@ -2416,7 +2460,7 @@ const SettingsPanel = React.memo(function SettingsPanel({
                 <div className="p-4 border-t border-[var(--border-primary)]/80">
                   <div className="flex items-center justify-between text-[13px] text-[var(--text-muted)] font-mono">
                     <span>{apis.length} REGISTERED APIs</span>
-                    <span>{apis.filter((a) => a.has_key).length} KEYS CONFIGURED</span>
+                    <span>{apis.filter((a) => a.has_key && a.is_set).length} KEYS CONFIGURED</span>
                   </div>
                 </div>
               </>

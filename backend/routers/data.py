@@ -282,6 +282,20 @@ async def ais_feed(request: Request):
     return {"status": "ok", "ingested": count}
 
 
+@router.get("/api/trail/flight/{icao24}")
+@limiter.limit("120/minute")
+async def get_selected_flight_trail(icao24: str, request: Request):  # noqa: ARG001
+    from services.fetchers.flights import get_flight_trail
+    return {"id": icao24, "trail": get_flight_trail(icao24)}
+
+
+@router.get("/api/trail/ship/{mmsi}")
+@limiter.limit("120/minute")
+async def get_selected_ship_trail(mmsi: int, request: Request):  # noqa: ARG001
+    from services.ais_stream import get_vessel_trail
+    return {"id": mmsi, "trail": get_vessel_trail(mmsi)}
+
+
 @router.post("/api/viewport")
 @limiter.limit("60/minute")
 async def update_viewport(vp: ViewportUpdate, request: Request):  # noqa: ARG001
@@ -325,8 +339,8 @@ async def update_layers(update: LayerUpdate, request: Request):
         logger.info("Meshtastic MQTT bridge stopped (layer disabled)")
     elif not old_mesh and new_mesh:
         try:
-            from services.config import get_settings
-            mqtt_enabled = bool(getattr(get_settings(), "MESH_MQTT_ENABLED", False))
+            from services.meshtastic_mqtt_settings import mqtt_bridge_enabled
+            mqtt_enabled = mqtt_bridge_enabled()
         except Exception:
             mqtt_enabled = False
         if mqtt_enabled:

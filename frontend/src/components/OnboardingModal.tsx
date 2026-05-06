@@ -2,9 +2,9 @@
 
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, ExternalLink, Key, Shield, Radar, Globe, Satellite, Ship, Radio } from 'lucide-react';
+import { X, ExternalLink, Key, Shield, Radar, Globe, Satellite, Ship, Radio, Bot, Copy, Check, Network } from 'lucide-react';
 
-const CURRENT_ONBOARDING_VERSION = '0.9.7-docker-keys-1';
+const CURRENT_ONBOARDING_VERSION = '0.9.75-agentic-onboarding-1';
 const STORAGE_KEY = `shadowbroker_onboarding_complete_v${CURRENT_ONBOARDING_VERSION}`;
 const LEGACY_STORAGE_KEY = 'shadowbroker_onboarding_complete';
 
@@ -68,6 +68,14 @@ const OnboardingModal = React.memo(function OnboardingModal({
   });
   const [setupSaving, setSetupSaving] = useState(false);
   const [setupMsg, setSetupMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [agentSecret, setAgentSecret] = useState('');
+  const [agentTier, setAgentTier] = useState<'restricted' | 'full'>('restricted');
+  const [agentMode, setAgentMode] = useState<'local' | 'remote'>('local');
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [agentMsg, setAgentMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [agentCopied, setAgentCopied] = useState(false);
+  const [torStarting, setTorStarting] = useState(false);
+  const [torAddress, setTorAddress] = useState('');
 
   const handleDismiss = () => {
     localStorage.setItem(STORAGE_KEY, 'true');
@@ -112,6 +120,110 @@ const OnboardingModal = React.memo(function OnboardingModal({
     } finally {
       setSetupSaving(false);
     }
+  };
+
+  const agentEndpoint =
+    agentMode === 'local'
+      ? 'http://localhost:8000'
+      : torAddress || '<prepare remote .onion link>';
+
+  const agentSnippet = [
+    `SHADOWBROKER_URL=${agentEndpoint}`,
+    agentSecret ? `SHADOWBROKER_KEY=${agentSecret}` : 'SHADOWBROKER_KEY=<generate in ShadowBroker>',
+    `SHADOWBROKER_ACCESS=${agentTier}`,
+    '',
+    '# FIRST: load available tools',
+    `GET ${agentEndpoint}/api/ai/tools`,
+    '',
+    '# Auth: HMAC-SHA256 signed requests.',
+    '# Restricted = read-only telemetry. Full = can write when asked.',
+  ].join('\n');
+  const remoteAgentNeedsTor = agentMode === 'remote' && !torAddress;
+
+  const fetchAgentConnectInfo = async (reveal = true) => {
+    setAgentLoading(true);
+    setAgentMsg(null);
+    try {
+      const res = await fetch(`/api/ai/connect-info?reveal=${reveal ? 'true' : 'false'}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.detail || 'Could not prepare agent credentials.');
+      }
+      setAgentSecret(data.hmac_secret || '');
+      setAgentTier(data.access_tier === 'full' ? 'full' : 'restricted');
+      setAgentMsg({ type: 'ok', text: 'Agent key is ready. Copy it into your local or remote agent runtime.' });
+    } catch (error) {
+      setAgentMsg({
+        type: 'err',
+        text: error instanceof Error ? error.message : 'Could not prepare agent credentials.',
+      });
+    } finally {
+      setAgentLoading(false);
+    }
+  };
+
+  const saveAgentTier = async (tier: 'restricted' | 'full') => {
+    setAgentTier(tier);
+    setAgentMsg(null);
+    try {
+      const res = await fetch('/api/ai/connect-info/access-tier', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tier }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.detail || 'Could not update agent access tier.');
+      }
+      setAgentMsg({
+        type: 'ok',
+        text: tier === 'full'
+          ? 'Full access saved. The agent can write to the dashboard when authenticated.'
+          : 'Restricted access saved. The agent can read telemetry but cannot write.',
+      });
+    } catch (error) {
+      setAgentMsg({
+        type: 'err',
+        text: error instanceof Error ? error.message : 'Could not update agent access tier.',
+      });
+    }
+  };
+
+  const prepareTorAgentAddress = async () => {
+    setTorStarting(true);
+    setAgentMsg(null);
+    try {
+      const res = await fetch('/api/settings/tor/start', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false || !data?.onion_address) {
+        throw new Error(data?.detail || 'Could not start Tor hidden service.');
+      }
+      setTorAddress(data.onion_address);
+      setAgentMsg({
+        type: 'ok',
+        text: 'Tor is ready. The remote agent link is private to your local ShadowBroker node.',
+      });
+    } catch (error) {
+      setAgentMsg({
+        type: 'err',
+        text:
+          error instanceof Error
+            ? error.message
+            : 'ShadowBroker could not install or start Tor automatically. Check network access and try again.',
+      });
+    } finally {
+      setTorStarting(false);
+    }
+  };
+
+  const copyAgentSnippet = async () => {
+    if (remoteAgentNeedsTor) {
+      setAgentMsg({ type: 'err', text: 'Install Tor and create the remote link first, then copy the agent config.' });
+      return;
+    }
+    await navigator.clipboard.writeText(agentSnippet);
+    setAgentCopied(true);
+    setTimeout(() => setAgentCopied(false), 1600);
   };
 
   return (
@@ -166,7 +278,7 @@ const OnboardingModal = React.memo(function OnboardingModal({
 
           {/* Step Indicators */}
           <div className="flex gap-2 px-6 pt-4">
-            {['API Keys', 'Trust Modes', 'Free Sources'].map((label, i) => (
+            {['API Keys', 'AI Agent', 'Trust Modes', 'Free Sources'].map((label, i) => (
               <button
                 key={label}
                 onClick={() => setStep(i)}
@@ -183,7 +295,7 @@ const OnboardingModal = React.memo(function OnboardingModal({
 
           {/* Content */}
           <div className="flex-1 overflow-y-auto styled-scrollbar p-6">
-            {step === 1 && (
+            {step === 2 && (
               <div className="space-y-4">
                 <div className="text-center py-4">
                   <div className="text-lg font-bold tracking-[0.3em] text-[var(--text-primary)] font-mono mb-2">
@@ -243,6 +355,157 @@ const OnboardingModal = React.memo(function OnboardingModal({
                     </div>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {step === 1 && (
+              <div className="space-y-5">
+                <div>
+                  <p className="text-[11px] text-violet-300 font-mono font-bold tracking-widest mb-2">
+                    STEP 1 - WHERE IS YOUR AGENT?
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setAgentMode('local')}
+                      className={`border px-4 py-3 text-left transition-all ${
+                        agentMode === 'local'
+                          ? 'border-cyan-500/50 bg-cyan-950/40'
+                          : 'border-[var(--border-primary)] hover:border-cyan-500/30'
+                      }`}
+                    >
+                      <p className={`text-sm font-mono font-bold ${agentMode === 'local' ? 'text-cyan-300' : 'text-[var(--text-secondary)]'}`}>
+                        Local
+                      </p>
+                      <p className="text-[10px] text-[var(--text-muted)] font-mono mt-1">
+                        Same machine as ShadowBroker
+                      </p>
+                    </button>
+                    <button
+                      onClick={() => setAgentMode('remote')}
+                      className={`border px-4 py-3 text-left transition-all ${
+                        agentMode === 'remote'
+                          ? 'border-violet-500/50 bg-violet-950/40'
+                          : 'border-[var(--border-primary)] hover:border-violet-500/30'
+                      }`}
+                    >
+                      <p className={`text-sm font-mono font-bold ${agentMode === 'remote' ? 'text-violet-300' : 'text-[var(--text-secondary)]'}`}>
+                        Remote
+                      </p>
+                      <p className="text-[10px] text-[var(--text-muted)] font-mono mt-1">
+                        Different machine over Tor
+                      </p>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-[11px] text-violet-300 font-mono font-bold tracking-widest mb-2">
+                    STEP 2 - WHAT CAN IT DO?
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => void saveAgentTier('restricted')}
+                      className={`border px-4 py-3 text-left transition-all ${
+                        agentTier === 'restricted'
+                          ? 'border-green-500/50 bg-green-950/30'
+                          : 'border-[var(--border-primary)] hover:border-green-500/30'
+                      }`}
+                    >
+                      <p className="text-sm text-green-300 font-mono font-bold flex items-center gap-2">
+                        <Shield size={14} /> Read Only
+                      </p>
+                      <p className="text-[10px] text-[var(--text-muted)] font-mono mt-2">
+                        Can see live telemetry but cannot change anything
+                      </p>
+                    </button>
+                    <button
+                      onClick={() => void saveAgentTier('full')}
+                      className={`border px-4 py-3 text-left transition-all ${
+                        agentTier === 'full'
+                          ? 'border-amber-500/50 bg-amber-950/30'
+                          : 'border-[var(--border-primary)] hover:border-amber-500/30'
+                      }`}
+                    >
+                      <p className="text-sm text-amber-300 font-mono font-bold flex items-center gap-2">
+                        <Network size={14} /> Full Access
+                      </p>
+                      <p className="text-[10px] text-[var(--text-muted)] font-mono mt-2">
+                        Can place pins, create layers, and trigger display actions
+                      </p>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between gap-3 mb-2">
+                    <div>
+                      <p className="text-[11px] text-violet-300 font-mono font-bold tracking-widest">
+                        STEP 3 - COPY THIS INTO YOUR AGENT
+                      </p>
+                      <p className="text-[10px] text-[var(--text-muted)] font-mono mt-1">
+                        Generate a local key, then copy these variables into OpenClaw, Hermes, or another HMAC agent.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => void fetchAgentConnectInfo(true)}
+                      disabled={agentLoading}
+                      className="px-3 py-2 border border-violet-500/40 text-violet-300 hover:bg-violet-500/10 disabled:opacity-50 text-[11px] font-mono tracking-widest"
+                    >
+                      {agentLoading ? 'GENERATING...' : 'GENERATE'}
+                    </button>
+                  </div>
+
+                  {remoteAgentNeedsTor && (
+                    <div className="mb-2 border border-violet-500/30 bg-violet-950/20 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] text-violet-200 font-mono font-bold tracking-widest">
+                            TOR REQUIRED FOR REMOTE AGENTS
+                          </p>
+                          <p className="text-[10px] text-[var(--text-muted)] font-mono mt-1 leading-relaxed">
+                            ShadowBroker will install or use Tor locally, then create a private .onion link for this backend.
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => void prepareTorAgentAddress()}
+                          disabled={torStarting}
+                          className="shrink-0 px-3 py-2 border border-violet-500/40 text-violet-200 hover:bg-violet-500/10 disabled:opacity-50 text-[10px] font-mono tracking-widest flex items-center gap-2"
+                        >
+                          <Network size={13} />
+                          {torStarting ? 'INSTALLING...' : 'INSTALL TOR'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="relative">
+                    <pre className="min-h-40 max-h-56 overflow-auto styled-scrollbar bg-[var(--bg-primary)] border border-violet-500/30 p-4 pr-24 text-[12px] text-violet-100 font-mono whitespace-pre-wrap leading-relaxed">
+                      {agentSnippet}
+                    </pre>
+                    <button
+                      onClick={() => void copyAgentSnippet()}
+                      disabled={remoteAgentNeedsTor}
+                      className="absolute top-3 right-3 px-3 py-2 border border-violet-500/50 bg-violet-950/50 text-violet-200 hover:bg-violet-800/30 disabled:opacity-45 disabled:hover:bg-violet-950/50 text-[11px] font-mono tracking-widest flex items-center gap-2"
+                    >
+                      {agentCopied ? <Check size={13} /> : <Copy size={13} />}
+                      {agentCopied ? 'COPIED' : 'COPY'}
+                    </button>
+                  </div>
+
+                  {agentMsg && (
+                    <p
+                      className={`mt-2 text-sm font-mono ${
+                        agentMsg.type === 'ok' ? 'text-green-300' : 'text-red-300'
+                      }`}
+                    >
+                      {agentMsg.text}
+                    </p>
+                  )}
+                </div>
+
+                <p className="text-[11px] text-orange-300/80 font-mono leading-relaxed">
+                  Remote agent access uses the signed HTTP API over Tor. Wormhole uses the same Tor/Arti transport lane when it is available; MLS-native agent transport is still planned.
+                </p>
               </div>
             )}
 
@@ -359,7 +622,7 @@ const OnboardingModal = React.memo(function OnboardingModal({
               </div>
             )}
 
-            {step === 2 && (
+            {step === 3 && (
               <div className="space-y-3">
                 <p className="text-sm text-[var(--text-secondary)] font-mono mb-3">
                   These data sources are completely free and require no API keys. They activate
@@ -401,7 +664,7 @@ const OnboardingModal = React.memo(function OnboardingModal({
             </button>
 
             <div className="flex gap-1.5">
-              {[0, 1, 2].map((i) => (
+              {[0, 1, 2, 3].map((i) => (
                 <div
                   key={i}
                   className={`w-1.5 h-1.5 rounded-full transition-colors ${step === i ? 'bg-cyan-400' : 'bg-[var(--border-primary)]'}`}
@@ -409,7 +672,7 @@ const OnboardingModal = React.memo(function OnboardingModal({
               ))}
             </div>
 
-            {step < 2 ? (
+            {step < 3 ? (
               <button
                 onClick={() => setStep(step + 1)}
                 className="px-4 py-2 border border-cyan-500/40 text-cyan-400 hover:bg-cyan-500/10 text-sm font-mono tracking-widest transition-all"

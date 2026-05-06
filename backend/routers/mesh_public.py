@@ -754,6 +754,112 @@ async def mesh_send(request: Request):
     }
 
 
+@router.post("/api/mesh/meshtastic/send", dependencies=[Depends(require_local_operator)])
+@limiter.limit("10/minute")
+@mesh_write_exempt(MeshWriteExemption.LOCAL_OPERATOR_ONLY)
+async def meshtastic_public_send(request: Request):
+    """Local public-MQTT send path for standalone Meshtastic-style identities."""
+    body = await request.json()
+    destination = str(body.get("destination", "") or "").strip() or "broadcast"
+    message = str(body.get("message", "") or "")
+    sender_id = str(body.get("sender_id", "") or "").strip().lower()
+    if not message:
+        return {"ok": False, "detail": "Missing required field: message"}
+
+    from services.mesh.mesh_router import (
+        MeshEnvelope,
+        MeshtasticTransport,
+        Priority,
+        TransportResult,
+        mesh_router,
+    )
+    from services.meshtastic_mqtt_settings import mqtt_bridge_enabled
+
+    if MeshtasticTransport._parse_node_id(sender_id) is None:
+        return {"ok": False, "detail": "Missing or invalid public Meshtastic address"}
+    if not mqtt_bridge_enabled():
+        return {"ok": False, "detail": "Meshtastic MQTT bridge is disabled"}
+
+    payload_bytes = len(message.encode("utf-8"))
+    payload_type = str(body.get("payload_type", "text") or "text")
+    max_bytes = _BYTE_LIMITS.get(payload_type, 200)
+    if payload_bytes > max_bytes:
+        return {
+            "ok": False,
+            "detail": f"Message too long ({payload_bytes} bytes). Maximum: {max_bytes} bytes for {payload_type} messages.",
+        }
+
+    priority_str = str(body.get("priority", "normal") or "normal").lower()
+    throttle_ok, throttle_reason = _check_throttle(sender_id, priority_str, "meshtastic")
+    if not throttle_ok:
+        return {"ok": False, "detail": throttle_reason}
+
+    priority_map = {
+        "emergency": Priority.EMERGENCY,
+        "high": Priority.HIGH,
+        "normal": Priority.NORMAL,
+        "low": Priority.LOW,
+    }
+    priority = priority_map.get(priority_str, Priority.NORMAL)
+    envelope = MeshEnvelope(
+        sender_id=sender_id,
+        destination=destination,
+        channel=str(body.get("channel", "LongFast") or "LongFast"),
+        priority=priority,
+        payload=message,
+        ephemeral=bool(body.get("ephemeral", False)),
+        trust_tier="public_degraded",
+    )
+
+    if not mesh_router.meshtastic.can_reach(envelope):
+        results = [TransportResult(False, "meshtastic", "Message exceeds Meshtastic payload limit")]
+    else:
+        cb_ok, cb_reason = mesh_router.breakers["meshtastic"].check_and_record(envelope.priority)
+        if not cb_ok:
+            results = [TransportResult(False, "meshtastic", cb_reason)]
+        else:
+            envelope.route_reason = (
+                "Local public Meshtastic MQTT path"
+                if MeshtasticTransport._parse_node_id(destination) is None
+                else "Local public Meshtastic direct node path"
+            )
+            credentials = {"mesh_region": str(body.get("mesh_region", "US") or "US")}
+            result = mesh_router.meshtastic.send(envelope, credentials)
+            if result.ok:
+                envelope.routed_via = mesh_router.meshtastic.NAME
+            results = [result]
+
+    any_ok = any(r.ok for r in results)
+    if any_ok and envelope.routed_via == "meshtastic":
+        try:
+            from datetime import datetime
+            from services.sigint_bridge import sigint_grid
+
+            bridge = sigint_grid.mesh
+            if bridge:
+                bridge.messages.appendleft(
+                    {
+                        "from": MeshtasticTransport.mesh_address_for_sender(sender_id),
+                        "to": destination if MeshtasticTransport._parse_node_id(destination) is not None else "broadcast",
+                        "text": message,
+                        "region": str(body.get("mesh_region", "US") or "US"),
+                        "channel": str(body.get("channel", "LongFast") or "LongFast"),
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    }
+                )
+        except Exception:
+            pass
+
+    return {
+        "ok": any_ok,
+        "message_id": envelope.message_id,
+        "event_id": "",
+        "routed_via": envelope.routed_via,
+        "route_reason": envelope.route_reason,
+        "results": [r.to_dict() for r in results],
+    }
+
+
 @router.get("/api/mesh/log")
 @limiter.limit("30/minute")
 async def mesh_log(request: Request):

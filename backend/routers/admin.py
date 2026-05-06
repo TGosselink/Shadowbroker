@@ -28,6 +28,18 @@ class TimeMachineToggle(BaseModel):
     enabled: bool
 
 
+class MeshtasticMqttUpdate(BaseModel):
+    enabled: bool | None = None
+    broker: str | None = None
+    port: int | None = None
+    username: str | None = None
+    password: str | None = None
+    psk: str | None = None
+    include_default_roots: bool | None = None
+    extra_roots: str | None = None
+    extra_topics: str | None = None
+
+
 @router.get("/api/settings/api-keys", dependencies=[Depends(require_local_operator)])
 @limiter.limit("30/minute")
 async def api_get_keys(request: Request):
@@ -120,7 +132,70 @@ async def api_get_node_settings(request: Request):
 @limiter.limit("10/minute")
 async def api_set_node_settings(request: Request, body: NodeSettingsUpdate):
     _refresh_node_peer_store()
-    return _set_participant_node_enabled(bool(body.enabled))
+    result = _set_participant_node_enabled(bool(body.enabled))
+    if bool(body.enabled):
+        try:
+            import main as _main
+
+            _main._kick_public_sync_background("operator_enable")
+        except Exception:
+            logger.debug("Unable to kick Infonet sync after node enable", exc_info=True)
+    return result
+
+
+def _meshtastic_runtime_snapshot() -> dict[str, Any]:
+    from services.meshtastic_mqtt_settings import redacted_meshtastic_mqtt_settings
+    from services.sigint_bridge import sigint_grid
+
+    return {
+        **redacted_meshtastic_mqtt_settings(),
+        "runtime": sigint_grid.mesh.status(),
+    }
+
+
+@router.get("/api/settings/meshtastic-mqtt", dependencies=[Depends(require_local_operator)])
+@limiter.limit("30/minute")
+async def api_get_meshtastic_mqtt_settings(request: Request):
+    return _meshtastic_runtime_snapshot()
+
+
+@router.put("/api/settings/meshtastic-mqtt", dependencies=[Depends(require_local_operator)])
+@limiter.limit("10/minute")
+async def api_set_meshtastic_mqtt_settings(request: Request, body: MeshtasticMqttUpdate):
+    from services.meshtastic_mqtt_settings import write_meshtastic_mqtt_settings
+    from services.sigint_bridge import sigint_grid
+
+    updates = body.model_dump(exclude_unset=True)
+    # Empty secret fields mean "keep existing"; explicit non-empty values replace.
+    if updates.get("password") == "":
+        updates.pop("password", None)
+    if updates.get("psk") == "":
+        updates.pop("psk", None)
+
+    enabled_requested = updates.get("enabled")
+    settings = write_meshtastic_mqtt_settings(**updates)
+
+    if enabled_requested is True:
+        # Public MQTT and Wormhole are intentionally mutually exclusive lanes.
+        try:
+            from services.wormhole_settings import write_wormhole_settings
+            from services.wormhole_supervisor import disconnect_wormhole
+
+            write_wormhole_settings(enabled=False)
+            disconnect_wormhole(reason="public_mesh_enabled")
+        except Exception as exc:
+            logger.warning("Failed to disable Wormhole while enabling public mesh: %s", exc)
+
+    if bool(settings.get("enabled")):
+        if sigint_grid.mesh.is_running():
+            sigint_grid.mesh.stop()
+            threading.Timer(1.0, sigint_grid.mesh.start).start()
+        else:
+            sigint_grid.mesh.start()
+    else:
+        sigint_grid.mesh.stop()
+
+    return _meshtastic_runtime_snapshot()
 
 
 @router.get("/api/settings/timemachine")

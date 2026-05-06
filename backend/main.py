@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from json import JSONDecodeError
 
-APP_VERSION = "0.9.7"
+APP_VERSION = "0.9.75"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1489,6 +1489,33 @@ def _run_public_sync_cycle() -> SyncWorkerState:
     )
 
 
+_NODE_SYNC_KICK_LOCK = threading.Lock()
+
+
+def _kick_public_sync_background(reason: str = "") -> None:
+    """Start one immediate Infonet sync attempt without waiting for the poll loop."""
+    if not _node_runtime_supported() or not _participant_node_enabled():
+        return
+
+    def _runner() -> None:
+        if not _NODE_SYNC_KICK_LOCK.acquire(blocking=False):
+            return
+        try:
+            label = f" ({reason})" if reason else ""
+            logger.info("Infonet sync kick starting%s", label)
+            _run_public_sync_cycle()
+        except Exception:
+            logger.exception("Infonet sync kick failed")
+        finally:
+            _NODE_SYNC_KICK_LOCK.release()
+
+    threading.Thread(
+        target=_runner,
+        daemon=True,
+        name="infonet-sync-kick",
+    ).start()
+
+
 def _public_infonet_sync_loop() -> None:
     from services.mesh.mesh_hashchain import infonet
 
@@ -2205,6 +2232,7 @@ async def lifespan(app: FastAPI):
                     set_sync_state(_set_node_sync_disabled_state())
                 _NODE_SYNC_STOP.clear()
                 threading.Thread(target=_public_infonet_sync_loop, daemon=True).start()
+                _kick_public_sync_background("startup")
                 threading.Thread(target=_http_peer_push_loop, daemon=True).start()
                 threading.Thread(target=_http_gate_push_loop, daemon=True).start()
                 threading.Thread(target=_http_gate_pull_loop, daemon=True).start()
@@ -8784,7 +8812,10 @@ async def api_get_node_settings(request: Request):
 @limiter.limit("10/minute")
 async def api_set_node_settings(request: Request, body: NodeSettingsUpdate):
     _refresh_node_peer_store()
-    return _set_participant_node_enabled(bool(body.enabled))
+    result = _set_participant_node_enabled(bool(body.enabled))
+    if bool(body.enabled):
+        _kick_public_sync_background("operator_enable")
+    return result
 
 
 @app.get("/api/settings/wormhole")

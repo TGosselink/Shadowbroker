@@ -22,6 +22,12 @@ from collections import deque
 from datetime import datetime, timezone
 
 from services.config import get_settings
+from services.meshtastic_mqtt_settings import (
+    mqtt_bridge_enabled,
+    mqtt_connection_config,
+    mqtt_psk_hex,
+    mqtt_subscription_settings,
+)
 from services.mesh.meshtastic_topics import all_available_roots, build_subscription_topics, known_roots, parse_topic_metadata
 
 logger = logging.getLogger("services.sigint")
@@ -477,22 +483,13 @@ class MeshtasticBridge:
     @staticmethod
     def _mqtt_config() -> tuple[str, int, str, str]:
         """Return (broker, port, user, password) from settings."""
-        try:
-            s = get_settings()
-            return (
-                str(s.MESH_MQTT_BROKER or "mqtt.meshtastic.org"),
-                int(s.MESH_MQTT_PORT or 1883),
-                str(s.MESH_MQTT_USER or "meshdev"),
-                str(s.MESH_MQTT_PASS or "large4cats"),
-            )
-        except Exception:
-            return ("mqtt.meshtastic.org", 1883, "meshdev", "large4cats")
+        return mqtt_connection_config()
 
     @classmethod
     def _resolve_psk(cls) -> bytes:
         """Return the PSK from config, or the default LongFast key if empty."""
         try:
-            raw = str(getattr(get_settings(), "MESH_MQTT_PSK", "") or "").strip()
+            raw = mqtt_psk_hex()
         except Exception:
             raw = ""
         if not raw:
@@ -506,6 +503,11 @@ class MeshtasticBridge:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._client_id = self._build_client_id()
+        self._connected = False
+        self._last_error = ""
+        self._last_connected_at = 0.0
+        self._last_disconnected_at = 0.0
+        self._last_broker = ""
         # Rate-limiter: sliding window of receive timestamps
         self._rx_timestamps: deque[float] = deque()
         self._rx_dropped = 0
@@ -518,10 +520,11 @@ class MeshtasticBridge:
         second client connects with the same id. Using a fixed id made separate
         ShadowBroker instances kick each other off the broker.
 
-        Includes the app version so the Meshtastic team can track our footprint.
+        This is deliberately not tied to the user's public mesh address or
+        ShadowBroker node identity; it is only an MQTT session handle.
         """
         suffix = uuid.uuid4().hex[:8]
-        return f"sb096-{suffix}"
+        return f"meshchat-{suffix}"
 
     def _dedupe_message(
         self,
@@ -544,7 +547,12 @@ class MeshtasticBridge:
 
     def start(self):
         if self._thread and self._thread.is_alive():
-            return
+            if not self._stop.is_set():
+                return
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                logger.warning("Meshtastic MQTT bridge is still stopping; start deferred")
+                return
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name="mesh-bridge")
         self._thread.start()
@@ -552,13 +560,37 @@ class MeshtasticBridge:
 
     def stop(self):
         self._stop.set()
+        self._connected = False
+
+    def is_running(self) -> bool:
+        return bool(self._thread and self._thread.is_alive() and not self._stop.is_set())
+
+    def status(self) -> dict:
+        broker, port, user, _pw = self._mqtt_config()
+        display_user = "" if user == "meshdev" else user
+        return {
+            "enabled": mqtt_bridge_enabled(),
+            "running": self.is_running(),
+            "connected": bool(self._connected),
+            "broker": broker,
+            "port": port,
+            "username": display_user,
+            "client_id": self._client_id,
+            "message_log_size": len(self.messages),
+            "signal_log_size": len(self.signals),
+            "last_error": self._last_error,
+            "last_broker": self._last_broker,
+            "last_connected_at": self._last_connected_at,
+            "last_disconnected_at": self._last_disconnected_at,
+            "rx_dropped": self._rx_dropped,
+        }
 
     def _subscription_topics(self) -> list[str]:
-        settings = get_settings()
+        extra_roots, extra_topics, include_defaults = mqtt_subscription_settings()
         return build_subscription_topics(
-            extra_roots=str(getattr(settings, "MESH_MQTT_EXTRA_ROOTS", "") or ""),
-            extra_topics=str(getattr(settings, "MESH_MQTT_EXTRA_TOPICS", "") or ""),
-            include_defaults=bool(getattr(settings, "MESH_MQTT_INCLUDE_DEFAULT_ROOTS", True)),
+            extra_roots=extra_roots,
+            extra_topics=extra_topics,
+            include_defaults=include_defaults,
         )
 
     def _run(self):
@@ -582,6 +614,9 @@ class MeshtasticBridge:
 
         def _on_connect(client, userdata, flags, rc):
             if rc == 0:
+                self._connected = True
+                self._last_error = ""
+                self._last_connected_at = time.time()
                 logger.info(
                     "Meshtastic MQTT connected (%s), subscribing to %s",
                     self._client_id,
@@ -590,6 +625,8 @@ class MeshtasticBridge:
                 for topic in topics:
                     client.subscribe(topic, qos=0)
             else:
+                self._connected = False
+                self._last_error = f"connect_refused:{rc}"
                 logger.error(
                     "Meshtastic MQTT connection refused (%s): rc=%s",
                     self._client_id,
@@ -597,7 +634,10 @@ class MeshtasticBridge:
                 )
 
         def _on_disconnect(client, userdata, rc):
+            self._connected = False
+            self._last_disconnected_at = time.time()
             if rc != 0:
+                self._last_error = f"disconnect:{rc}"
                 logger.warning(
                     "Meshtastic MQTT disconnected unexpectedly (%s, rc=%s), will auto-reconnect",
                     self._client_id,
@@ -607,6 +647,7 @@ class MeshtasticBridge:
                 logger.info("Meshtastic MQTT disconnected cleanly (%s)", self._client_id)
 
         broker, port, user, pw = self._mqtt_config()
+        self._last_broker = f"{broker}:{port}"
         client = mqtt.Client(client_id=self._client_id, protocol=mqtt.MQTTv311)
         client.username_pw_set(user, pw)
         client.on_connect = _on_connect
@@ -645,9 +686,6 @@ class MeshtasticBridge:
     def _on_message(self, client, userdata, msg):
         """Parse Meshtastic MQTT messages — protobuf + AES decryption."""
         try:
-            if self._rate_limited():
-                return
-
             payload = msg.payload
             topic = msg.topic
 
@@ -655,6 +693,8 @@ class MeshtasticBridge:
             if "/json/" in topic:
                 try:
                     data = json.loads(payload)
+                    if self._rate_limited():
+                        return
                     self._ingest_data(data, topic)
                     return
                 except (json.JSONDecodeError, UnicodeDecodeError):
@@ -687,6 +727,8 @@ class MeshtasticBridge:
                         }
                     )
                 else:
+                    if self._rate_limited():
+                        return
                     self._ingest_data(data, topic)
 
         except Exception as e:
@@ -1011,7 +1053,7 @@ class SIGINTGrid:
         self._started = True
         self.aprs.start()
         try:
-            mqtt_enabled = bool(getattr(get_settings(), "MESH_MQTT_ENABLED", False))
+            mqtt_enabled = mqtt_bridge_enabled()
         except Exception:
             mqtt_enabled = False
         if mqtt_enabled:
@@ -1123,13 +1165,12 @@ class SIGINTGrid:
             ch = msg.get("channel", "LongFast")
             channel_msgs[ch] = channel_msgs.get(ch, 0) + 1
 
+        extra_roots, _extra_topics, include_defaults = mqtt_subscription_settings()
+
         return {
             "regions": regions,
             "roots": roots,
-            "known_roots": known_roots(
-                str(getattr(get_settings(), "MESH_MQTT_EXTRA_ROOTS", "") or ""),
-                include_defaults=bool(getattr(get_settings(), "MESH_MQTT_INCLUDE_DEFAULT_ROOTS", True)),
-            ),
+            "known_roots": known_roots(extra_roots, include_defaults=include_defaults),
             "all_roots": all_available_roots(),
             "channel_messages": channel_msgs,
             "total_nodes": len(seen_callsigns),

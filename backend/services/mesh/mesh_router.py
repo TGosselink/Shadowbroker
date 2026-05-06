@@ -390,15 +390,9 @@ class MeshtasticTransport:
     def _mqtt_config() -> tuple[str, int, str, str]:
         """Return (broker, port, user, password) from settings."""
         try:
-            from services.config import get_settings
+            from services.meshtastic_mqtt_settings import mqtt_connection_config
 
-            s = get_settings()
-            return (
-                str(s.MESH_MQTT_BROKER or "mqtt.meshtastic.org"),
-                int(s.MESH_MQTT_PORT or 1883),
-                str(s.MESH_MQTT_USER or "meshdev"),
-                str(s.MESH_MQTT_PASS or "large4cats"),
-            )
+            return mqtt_connection_config()
         except Exception:
             return ("mqtt.meshtastic.org", 1883, "meshdev", "large4cats")
 
@@ -433,8 +427,9 @@ class MeshtasticTransport:
     def _resolve_psk(cls) -> bytes:
         """Return the PSK from config, or the default LongFast key if empty."""
         try:
-            from services.config import get_settings
-            raw = str(getattr(get_settings(), "MESH_MQTT_PSK", "") or "").strip()
+            from services.meshtastic_mqtt_settings import mqtt_psk_hex
+
+            raw = mqtt_psk_hex()
         except Exception:
             raw = ""
         if not raw:
@@ -449,7 +444,10 @@ class MeshtasticTransport:
 
     @staticmethod
     def mesh_address_for_sender(sender_id: str) -> str:
-        """Return the synthetic public mesh address used for MQTT-originated sends."""
+        """Return the public mesh address used for MQTT-originated sends."""
+        parsed = MeshtasticTransport._parse_node_id(sender_id)
+        if parsed is not None:
+            return f"!{parsed:08x}"
         return f"!{MeshtasticTransport._stable_node_id(sender_id):08x}"
 
     @staticmethod
@@ -489,7 +487,8 @@ class MeshtasticTransport:
 
             # Generate IDs
             packet_id = random.randint(1, 0xFFFFFFFF)
-            from_node = self._stable_node_id(envelope.sender_id)
+            parsed_sender = self._parse_node_id(envelope.sender_id)
+            from_node = parsed_sender if parsed_sender is not None else self._stable_node_id(envelope.sender_id)
             direct_node = self._parse_node_id(envelope.destination)
             to_node = direct_node if direct_node is not None else 0xFFFFFFFF
 
@@ -529,9 +528,7 @@ class MeshtasticTransport:
                     error_msg[0] = f"MQTT connect refused: rc={rc}"
                     client.disconnect()
 
-            client = mqtt.Client(
-                client_id=f"shadowbroker-tx-{envelope.message_id[:8]}", protocol=mqtt.MQTTv311
-            )
+            client = mqtt.Client(client_id=f"meshchat-tx-{envelope.message_id[:8]}", protocol=mqtt.MQTTv311)
             broker, port, user, pw = self._mqtt_config()
             client.username_pw_set(user, pw)
             client.on_connect = _on_connect

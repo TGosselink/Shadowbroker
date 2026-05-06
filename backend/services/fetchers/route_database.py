@@ -25,7 +25,7 @@ _REFRESH_INTERVAL_S = 5 * 24 * 3600
 _HTTP_TIMEOUT_S = 60
 
 _USER_AGENT = (
-    "ShadowBroker-OSINT/0.9.7 "
+    "ShadowBroker-OSINT/0.9.75 "
     "(+https://github.com/BigBodyCobain/Shadowbroker; "
     "contact: bigbodycobain@gmail.com)"
 )
