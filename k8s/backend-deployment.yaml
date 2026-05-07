@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: shadowbroker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      securityContext:
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      containers:
+        - name: backend
+          image: ghcr.io/bigbodycobain/shadowbroker-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: AIS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: shadowbroker-env
+                  key: AIS_API_KEY
+            - name: OPENSKY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: shadowbroker-env
+                  key: OPENSKY_CLIENT_ID
+            - name: OPENSKY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: shadowbroker-env
+                  key: OPENSKY_CLIENT_SECRET
+            - name: LTA_ACCOUNT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: shadowbroker-env
+                  key: LTA_ACCOUNT_KEY
+            - name: ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: shadowbroker-env
+                  key: ADMIN_KEY
+            - name: FINNHUB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: shadowbroker-env
+                  key: FINNHUB_API_KEY
+            - name: MESH_PEER_PUSH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: shadowbroker-env
+                  key: MESH_PEER_PUSH_SECRET
+            - name: CORS_ORIGINS
+              value: ""
+            - name: MESH_DEFAULT_SYNC_PEERS
+              value: "https://node.shadowbroker.info"
+            - name: MESH_RELAY_PEERS
+              value: ""
+            - name: MESH_MQTT_ENABLED
+              value: "false"
+            - name: MESH_MQTT_BROKER
+              value: "mqtt.meshtastic.org"
+            - name: MESH_MQTT_PORT
+              value: "1883"
+            - name: MESH_MQTT_USER
+              value: "meshdev"
+            - name: MESH_MQTT_PASS
+              value: "large4cats"
+            - name: MESH_MQTT_PSK
+              value: ""
+            - name: MESH_MQTT_INCLUDE_DEFAULT_ROOTS
+              value: "true"
+            - name: MESH_MQTT_EXTRA_ROOTS
+              value: ""
+            - name: MESH_MQTT_EXTRA_TOPICS
+              value: ""
+            - name: MESHTASTIC_OPERATOR_CALLSIGN
+              value: ""
+            # In k8s there is no Docker bridge; disable that trust flag.
+            - name: SHADOWBROKER_TRUST_DOCKER_BRIDGE_LOCAL_OPERATOR
+              value: "0"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "4Gi"
+              cpu: "2"
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - name: backend-data
+              mountPath: /app/data
+      volumes:
+        - name: backend-data
+          persistentVolumeClaim:
+            claimName: backend-data

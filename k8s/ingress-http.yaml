@@ -1,0 +1,28 @@
+# Redirects HTTP -> HTTPS permanently.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: shadowbroker
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+# HTTP IngressRoute — only purpose is to redirect to HTTPS.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: shadowbroker-http
+  namespace: shadowbroker
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`shadowbroker.local`)
+      kind: Rule
+      middlewares:
+        - name: redirect-https
+      services:
+        - name: frontend
+          port: 3000

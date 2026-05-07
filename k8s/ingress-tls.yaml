@@ -1,0 +1,17 @@
+# HTTPS IngressRoute — serves the frontend and terminates TLS.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: shadowbroker-https
+  namespace: shadowbroker
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`shadowbroker.local`)
+      kind: Rule
+      services:
+        - name: frontend
+          port: 3000
+  tls:
+    secretName: shadowbroker-tls
