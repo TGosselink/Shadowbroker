@@ -7,6 +7,7 @@ import React, { useEffect, useRef, useCallback } from 'react';
 import WikiImage from '@/components/WikiImage';
 import type { SelectedEntity, RegionDossier, FimiData } from "@/types/dashboard";
 import { useDataKeys } from '@/hooks/useDataStore';
+import { API_BASE } from '@/lib/api';
 import { lookupShodanHost } from '@/lib/shodanClient';
 import type { ShodanHost } from '@/types/shodan';
 
@@ -291,6 +292,8 @@ function estimateObservedEmissions(flight: any): {
     const fuelGph = Number(flight?.emissions?.fuel_gph);
     const co2KgPerHour = Number(flight?.emissions?.co2_kg_per_hour);
     const trail = Array.isArray(flight?.trail) ? (flight.trail as FlightTrailPoint[]) : [];
+    const isTrackedAircraft = flight?.type === 'tracked_flight' || Boolean(flight?.alert_category);
+    const minimumObservedHours = isTrackedAircraft ? 1 / 60 : 5 / 60;
     if (!Number.isFinite(fuelGph) || !Number.isFinite(co2KgPerHour)) {
         return null;
     }
@@ -301,7 +304,7 @@ function estimateObservedEmissions(flight: any): {
         .sort((a, b) => a - b);
     if (timestamps.length >= 2) {
         const elapsedHours = (timestamps[timestamps.length - 1] - timestamps[0]) / 3600;
-        if (Number.isFinite(elapsedHours) && elapsedHours >= 5 / 60) {
+        if (Number.isFinite(elapsedHours) && elapsedHours >= minimumObservedHours) {
             let distance = 0;
             let previous: { lat: number; lng: number } | null = null;
             for (const point of trail) {
@@ -336,7 +339,7 @@ function estimateObservedEmissions(flight: any): {
     ) {
         const flownNm = distanceNm(origin, current);
         const elapsedHours = flownNm / speedKnots;
-        if (Number.isFinite(elapsedHours) && elapsedHours >= 5 / 60 && elapsedHours <= 18) {
+        if (Number.isFinite(elapsedHours) && elapsedHours >= minimumObservedHours && elapsedHours <= 18) {
             return {
                 fuelGallons: Math.round(fuelGph * elapsedHours),
                 co2Kg: Math.round(co2KgPerHour * elapsedHours),
@@ -405,6 +408,7 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
       'airports', 'last_updated', 'threat_level',
     ] as const);
     const [isMinimized, setIsMinimized] = useState(false);
+    const [selectedFlightTrail, setSelectedFlightTrail] = useState<FlightTrailPoint[]>([]);
     const [expandedIndexes, setExpandedIndexes] = useState<number[]>([]);
     const [fimiExpanded, setFimiExpanded] = useState(false);
     const [aiSummaryOpen, setAiSummaryOpen] = useState(false);
@@ -453,6 +457,58 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
         return flight?.model;
     })();
     const { imgUrl: aircraftImgUrl, wikiUrl: aircraftWikiUrl, loading: aircraftImgLoading } = useAircraftImage(selectedFlightModel);
+
+    useEffect(() => {
+        const flightSelectionTypes = new Set([
+            'flight',
+            'commercial_flight',
+            'private_flight',
+            'private_ga',
+            'private_jet',
+            'military_flight',
+            'tracked_flight',
+        ]);
+        if (!selectedEntity || !flightSelectionTypes.has(selectedEntity.type)) {
+            setSelectedFlightTrail([]);
+            return;
+        }
+
+        const trailId = String(selectedEntity.id || '').trim();
+        if (!trailId) {
+            setSelectedFlightTrail([]);
+            return;
+        }
+
+        let cancelled = false;
+        const refreshSelectedFlightTrail = () => {
+            fetch(`${API_BASE}/api/trail/flight/${encodeURIComponent(trailId)}`, { cache: 'no-store' })
+                .then((res) => (res.ok ? res.json() : null))
+                .then((payload) => {
+                    if (cancelled) return;
+                    const trail = Array.isArray(payload?.trail) ? payload.trail as FlightTrailPoint[] : [];
+                    setSelectedFlightTrail(trail);
+                })
+                .catch(() => {
+                    if (!cancelled) setSelectedFlightTrail([]);
+                });
+        };
+        refreshSelectedFlightTrail();
+        const trailRefreshTimer = window.setInterval(refreshSelectedFlightTrail, 30000);
+
+        return () => {
+            cancelled = true;
+            window.clearInterval(trailRefreshTimer);
+        };
+    }, [selectedEntity?.id, selectedEntity?.type]);
+
+    const withSelectedTrail = useCallback((flight: any) => {
+        if (!flight || selectedFlightTrail.length < 2) return flight;
+        const selectedId = String(selectedEntity?.id || '').trim().toLowerCase();
+        const flightId = String(flight.icao24 || '').trim().toLowerCase();
+        if (!selectedId || !flightId || selectedId !== flightId) return flight;
+        return { ...flight, trail: selectedFlightTrail };
+    }, [selectedEntity?.id, selectedFlightTrail]);
+
     const [shodanDetail, setShodanDetail] = useState<ShodanHost | null>(null);
     const [shodanLoading, setShodanLoading] = useState(false);
     const [shodanError, setShodanError] = useState<string | null>(null);
@@ -666,6 +722,7 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
     if (selectedEntity?.type === 'tracked_flight') {
         const flight = data?.tracked_flights?.find((f: any) => f.icao24 === selectedEntity.id);
         if (flight) {
+            const flightForEmissions = withSelectedTrail(flight);
             const callsign = flight.callsign || "UNKNOWN";
             const alertColorMap: Record<string, string> = {
                 '#ff1493': 'text-[#ff1493]', pink: 'text-[#ff1493]', red: 'text-red-400', yellow: 'text-yellow-400',
@@ -851,7 +908,7 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
                                 <span className={`text-xs font-bold ${flight.squawk === '7700' ? 'text-red-400 animate-pulse' : flight.squawk === '7600' ? 'text-yellow-400' : 'text-[var(--text-primary)]'}`}>{flight.squawk}{flight.squawk === '7700' ? ' ⚠ EMERGENCY' : flight.squawk === '7600' ? ' COMMS LOST' : ''}</span>
                             </div>
                         )}
-                        <EmissionsEstimateBlock flight={flight} />
+                        <EmissionsEstimateBlock flight={flightForEmissions} />
                         {flight.alert_link && (
                             <div className="flex justify-between items-center border-b border-[var(--border-primary)] pb-2">
                                 <span className="text-[var(--text-muted)] text-[10px]">REFERENCE</span>
@@ -903,6 +960,7 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
         const flight = flightsList?.find((f: any) => f.icao24 === selectedEntity.id);
 
         if (flight) {
+            const flightForEmissions = withSelectedTrail(flight);
             const callsign = flight.callsign || "UNKNOWN";
             let airline = "UNKNOWN";
             const isPrivateFlight = selectedEntity.type === 'private_flight' || selectedEntity.type === 'private_jet';
@@ -1107,7 +1165,7 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
                             <span className="text-[var(--text-muted)] text-[10px]">ROUTE</span>
                             <span className="text-cyan-400 text-xs font-bold">{flight.origin_name !== "UNKNOWN" ? `[${flight.origin_name}] → [${flight.dest_name}]` : "UNKNOWN"}</span>
                         </div>
-                        <EmissionsEstimateBlock flight={flight} />
+                        <EmissionsEstimateBlock flight={flightForEmissions} />
                         {flight.icao24 && (
                             <div className="flex justify-between items-center border-b border-[var(--border-primary)] pb-2">
                                 <span className="text-[var(--text-muted)] text-[10px]">FLIGHT RECORD</span>

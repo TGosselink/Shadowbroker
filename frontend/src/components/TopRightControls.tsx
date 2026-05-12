@@ -33,8 +33,8 @@ import {
 import { purgeBrowserContactGraph, purgeBrowserSigningMaterial, setSecureModeCached, getNodeIdentity, generateNodeKeys } from '@/mesh/meshIdentity';
 import { purgeBrowserDmState } from '@/mesh/meshDmWorkerClient';
 import {
-  DEFAULT_INFONET_SEED_URL,
   fetchInfonetNodeStatusSnapshot,
+  startTorHiddenService,
   type InfonetNodeStatusSnapshot,
 } from '@/mesh/controlPlaneStatusClient';
 import {
@@ -263,6 +263,10 @@ export default function TopRightControls({
           await generateNodeKeys();
         }
         setActivatingPhase('peers');
+        const torStatus = await startTorHiddenService();
+        if (!torStatus?.running || !torStatus?.onion_address) {
+          throw new Error(torStatus?.detail || 'Tor onion service did not start');
+        }
       }
 
       const res = await controlPlaneFetch('/api/settings/node', {
@@ -833,9 +837,9 @@ export default function TopRightControls({
                           : activatingPhase === 'peers' ? 'text-cyan-300'
                           : 'text-green-300'
                         }>
-                          {activatingPhase === 'keys' ? 'Connecting to default seed...'
-                          : activatingPhase === 'peers' ? 'Connecting to default seed...'
-                          : 'Default seed connected'}
+                          {activatingPhase === 'keys' ? 'Preparing onion transport...'
+                          : activatingPhase === 'peers' ? 'Finding bootstrap peers...'
+                          : 'Bootstrap peers ready'}
                         </span>
                       </div>
                       {/* Step: Sync chain */}
@@ -899,7 +903,7 @@ export default function TopRightControls({
                     <div className="border border-cyan-500/20 bg-cyan-950/10 px-4 py-4 text-[10px] font-mono text-cyan-100 leading-[1.8]">
                       Do you want to activate a node on this install?
                       <div className="mt-2 text-[9px] text-cyan-200/70 normal-case tracking-normal">
-                        This turns on your local participant node and lets this install keep syncing the public Infonet chain from <span className="text-cyan-300">{DEFAULT_INFONET_SEED_URL}</span>.
+                        This turns on your local participant node and syncs Infonet only through available Wormhole onion/RNS peers. Clearnet bootstrap is disabled by default.
                       </div>
                     </div>
                     {(bootstrapFailed || nodeStatusError || nodeToggleError) && (
@@ -930,10 +934,10 @@ export default function TopRightControls({
                       <div className="text-cyan-300 tracking-[0.18em]">BY CONTINUING YOU AGREE:</div>
                       <ul className="mt-3 space-y-2 list-disc pl-5">
                         <li>This install can keep a local copy of the public Infonet chain.</li>
-                        <li>Fresh installs pull from the bundled default seed at {DEFAULT_INFONET_SEED_URL}.</li>
-                        <li>Participant-node sync is public-facing unless you separately use obfuscated-lane features.</li>
-                        <li>Your backend may sync with configured or bundled bootstrap peers in the background.</li>
-                        <li>Wormhole provides gates (transitional private lane) and Dead Drop / DM (stronger private lane) as separate postures.</li>
+                        <li>Fresh installs do not use a clearnet Infonet seed.</li>
+                        <li>Participant-node sync requires an onion/RNS peer through Wormhole.</li>
+                        <li>Your backend may sync with configured private bootstrap peers in the background.</li>
+                        <li>Wormhole keeps Infonet, gates, Dead Drop, and DM traffic on the obfuscated lane.</li>
                       </ul>
                     </div>
                     <div className="text-[11px] font-mono uppercase tracking-[0.2em] text-cyan-300/80">

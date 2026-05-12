@@ -52,7 +52,9 @@ def test_refresh_node_peer_store_promotes_manifest_peers_to_sync_only(tmp_path, 
     monkeypatch.setenv("MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY", manifest_pub)
     monkeypatch.setenv("MESH_BOOTSTRAP_MANIFEST_PATH", str(manifest_path))
     monkeypatch.setenv("MESH_RELAY_PEERS", "https://operator.example")
+    monkeypatch.setenv("MESH_BOOTSTRAP_SEED_PEERS", "")
     monkeypatch.setenv("MESH_DEFAULT_SYNC_PEERS", "")
+    monkeypatch.setenv("MESH_INFONET_ALLOW_CLEARNET_SYNC", "true")
     get_settings.cache_clear()
 
     try:
@@ -74,7 +76,7 @@ def test_refresh_node_peer_store_promotes_manifest_peers_to_sync_only(tmp_path, 
     assert [record.peer_url for record in store.records_for_bucket("push")] == ["https://operator.example"]
 
 
-def test_refresh_node_peer_store_adds_default_seed_as_pull_only_peer(tmp_path, monkeypatch):
+def test_refresh_node_peer_store_adds_bootstrap_seed_as_pull_only_peer(tmp_path, monkeypatch):
     import main
     from services.config import get_settings
     from services.mesh import mesh_peer_store as peer_store_mod
@@ -82,7 +84,9 @@ def test_refresh_node_peer_store_adds_default_seed_as_pull_only_peer(tmp_path, m
     peer_store_path = tmp_path / "peer_store.json"
     monkeypatch.setattr(peer_store_mod, "DEFAULT_PEER_STORE_PATH", peer_store_path)
     monkeypatch.setenv("MESH_RELAY_PEERS", "")
-    monkeypatch.setenv("MESH_DEFAULT_SYNC_PEERS", "https://node.shadowbroker.info")
+    monkeypatch.setenv("MESH_BOOTSTRAP_SEED_PEERS", "https://node.shadowbroker.info")
+    monkeypatch.setenv("MESH_DEFAULT_SYNC_PEERS", "")
+    monkeypatch.setenv("MESH_INFONET_ALLOW_CLEARNET_SYNC", "true")
     monkeypatch.setenv("MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY", "")
     get_settings.cache_clear()
 
@@ -94,6 +98,7 @@ def test_refresh_node_peer_store_adds_default_seed_as_pull_only_peer(tmp_path, m
         get_settings.cache_clear()
 
     assert snapshot["manifest_loaded"] is False
+    assert snapshot["bootstrap_seed_peer_count"] == 1
     assert snapshot["default_sync_peer_count"] == 1
     assert snapshot["bootstrap_peer_count"] == 1
     assert snapshot["sync_peer_count"] == 1
@@ -105,6 +110,36 @@ def test_refresh_node_peer_store_adds_default_seed_as_pull_only_peer(tmp_path, m
         "https://node.shadowbroker.info"
     ]
     assert store.records_for_bucket("sync")[0].source == "bundle"
+
+
+def test_refresh_node_peer_store_suppresses_clearnet_seed_by_default(tmp_path, monkeypatch):
+    import main
+    from services.config import get_settings
+    from services.mesh import mesh_peer_store as peer_store_mod
+
+    peer_store_path = tmp_path / "peer_store.json"
+    monkeypatch.setattr(peer_store_mod, "DEFAULT_PEER_STORE_PATH", peer_store_path)
+    monkeypatch.setenv("MESH_RELAY_PEERS", "")
+    monkeypatch.setenv("MESH_BOOTSTRAP_SEED_PEERS", "https://node.shadowbroker.info")
+    monkeypatch.setenv("MESH_DEFAULT_SYNC_PEERS", "")
+    monkeypatch.delenv("MESH_INFONET_ALLOW_CLEARNET_SYNC", raising=False)
+    monkeypatch.setenv("MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY", "")
+    get_settings.cache_clear()
+
+    try:
+        snapshot = main._refresh_node_peer_store(now=1_750_000_000)
+        store = peer_store_mod.PeerStore(peer_store_path)
+        store.load()
+    finally:
+        get_settings.cache_clear()
+
+    assert snapshot["private_transport_required"] is True
+    assert snapshot["skipped_clearnet_peer_count"] == 1
+    assert snapshot["bootstrap_peer_count"] == 0
+    assert snapshot["sync_peer_count"] == 0
+    assert "no clearnet sync fallback" in snapshot["last_bootstrap_error"]
+    assert store.records_for_bucket("bootstrap") == []
+    assert store.records_for_bucket("sync") == []
 
 
 def test_verify_peer_push_hmac_requires_allowlisted_peer(monkeypatch):
@@ -172,13 +207,19 @@ def test_infonet_status_includes_node_runtime_snapshot(monkeypatch):
 
 def test_public_sync_cycle_allows_first_node_without_peers(tmp_path, monkeypatch):
     import main
+    from services.config import get_settings
     from services.mesh import mesh_peer_store as peer_store_mod
 
     peer_store_path = tmp_path / "peer_store.json"
     monkeypatch.setattr(peer_store_mod, "DEFAULT_PEER_STORE_PATH", peer_store_path)
     monkeypatch.setattr(main, "_participant_node_enabled", lambda: True)
+    monkeypatch.setenv("MESH_INFONET_ALLOW_CLEARNET_SYNC", "true")
+    get_settings.cache_clear()
 
-    result = main._run_public_sync_cycle()
+    try:
+        result = main._run_public_sync_cycle()
+    finally:
+        get_settings.cache_clear()
 
     assert result.last_outcome == "solo"
     assert result.last_error == ""
