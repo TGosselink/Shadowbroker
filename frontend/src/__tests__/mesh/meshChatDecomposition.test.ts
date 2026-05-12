@@ -179,8 +179,10 @@ describe('MeshChat decomposition — identity persistence', () => {
     const controller = readFile('useMeshChatController.ts');
     expect(controller).toMatch(/from\s+['"]@\/mesh\/meshIdentity['"]/);
     expect(controller).toMatch(/getNodeIdentity/);
-    expect(controller).toMatch(/generateNodeKeys/);
-    expect(controller).toMatch(/signEvent/);
+    expect(controller).toMatch(/getStoredNodeDescriptor/);
+    expect(controller).toMatch(/nextSequence/);
+    expect(controller).toMatch(/verifyEventSignature/);
+    expect(controller).toMatch(/setSecureModeCached/);
   });
 
   it('storage module imports from meshIdentity for seal operations', () => {
