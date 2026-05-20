@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Send } from 'lucide-react';
 import { API_BASE } from '@/lib/api';
 import {
-  derivePublicMeshAddress,
   getNodeIdentity,
   hasSovereignty,
   signEvent,
@@ -13,9 +12,26 @@ import { PROTOCOL_VERSION } from '@/mesh/meshProtocol';
 import { validateEventPayload } from '@/mesh/meshSchema';
 
 const MESH_NODE_ID_RE = /^![0-9a-f]{8}$/i;
+const PUBLIC_MESH_ADDRESS_KEY = 'sb_public_meshtastic_address';
 
 function isMeshtasticNodeId(value: string | undefined | null): boolean {
   return !!value && MESH_NODE_ID_RE.test(value.trim());
+}
+
+function normalizePublicMeshAddress(value: string | undefined | null): string {
+  const raw = String(value || '').trim().toLowerCase();
+  const body = raw.startsWith('!') ? raw.slice(1) : raw;
+  if (!/^[0-9a-f]{8}$/.test(body)) return '';
+  return `!${body}`;
+}
+
+function readStoredPublicMeshAddress(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return normalizePublicMeshAddress(window.localStorage.getItem(PUBLIC_MESH_ADDRESS_KEY));
+  } catch {
+    return '';
+  }
 }
 
 /** Inline send-message form for SIGINT popups — routes via MeshRouter */
@@ -40,26 +56,11 @@ export function SigintSendForm({
   const isDirectMesh = isMesh && isMeshtasticNodeId(destination);
 
   useEffect(() => {
-    let cancelled = false;
     if (!isMesh) {
       setPublicMeshAddress('');
       return;
     }
-    const identity = getNodeIdentity();
-    if (!identity?.nodeId || !globalThis.crypto?.subtle) {
-      setPublicMeshAddress('');
-      return;
-    }
-    derivePublicMeshAddress(identity.nodeId)
-      .then((addr) => {
-        if (!cancelled) setPublicMeshAddress(addr);
-      })
-      .catch(() => {
-        if (!cancelled) setPublicMeshAddress('');
-      });
-    return () => {
-      cancelled = true;
-    };
+    setPublicMeshAddress(readStoredPublicMeshAddress());
   }, [isMesh]);
 
   const handleSend = async () => {
@@ -71,6 +72,56 @@ export function SigintSendForm({
     }
     setStatus('sending');
     try {
+      if (isMesh) {
+        const meshSender = normalizePublicMeshAddress(publicMeshAddress || readStoredPublicMeshAddress());
+        if (!meshSender) {
+          setStatus('error');
+          setDetail('public mesh key required');
+          return;
+        }
+        const payload = {
+          message: msg.trim(),
+          destination: destination || 'broadcast',
+          channel: channel || 'LongFast',
+          priority: 'normal',
+          ephemeral: false,
+          transport_lock: 'meshtastic',
+        };
+        const v = validateEventPayload('message', payload);
+        if (!v.ok) {
+          setStatus('error');
+          setDetail(`invalid payload: ${v.reason}`);
+          return;
+        }
+        const res = await fetch(`${API_BASE}/api/mesh/meshtastic/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            destination: destination || 'broadcast',
+            message: msg.trim(),
+            sender_id: meshSender,
+            channel: channel || 'LongFast',
+            priority: 'normal',
+            ephemeral: false,
+            transport_lock: 'meshtastic',
+            mesh_region: region || 'US',
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+          setStatus('sent');
+          const routeDetail = Array.isArray(data.results) && data.results[0]?.reason
+            ? String(data.results[0].reason)
+            : String(data.route_reason || 'MQTT broker accepted publish');
+          setDetail(routeDetail);
+          setMsg('');
+        } else {
+          setStatus('error');
+          setDetail(String(data.detail || data.route_reason || 'send failed'));
+        }
+        return;
+      }
+
       const identity = getNodeIdentity();
       if (!identity || !hasSovereignty()) {
         setStatus('error');
@@ -234,22 +285,7 @@ export function MeshtasticChannelFeed({ region, channel }: { region: string; cha
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    const identity = getNodeIdentity();
-    if (!identity?.nodeId || !globalThis.crypto?.subtle) {
-      setPublicMeshAddress('');
-      return;
-    }
-    derivePublicMeshAddress(identity.nodeId)
-      .then((addr) => {
-        if (!cancelled) setPublicMeshAddress(addr);
-      })
-      .catch(() => {
-        if (!cancelled) setPublicMeshAddress('');
-      });
-    return () => {
-      cancelled = true;
-    };
+    setPublicMeshAddress(readStoredPublicMeshAddress());
   }, []);
 
   const fetchData = useCallback(async () => {
@@ -281,6 +317,10 @@ export function MeshtasticChannelFeed({ region, channel }: { region: string; cha
   const regionData = channelStats?.roots?.[region] || channelStats?.regions?.[region];
   const regionChannels = regionData?.channels || {};
   const sortedChannels = Object.entries(regionChannels).sort((a, b) => b[1] - a[1]);
+  const channelMessages = messages.filter((m) => {
+    const target = String(m.to || 'broadcast').trim().toLowerCase();
+    return target === '' || target === 'broadcast' || target === '^all';
+  });
 
   if (loading)
     return <div className="text-[11px] text-cyan-400/50 animate-pulse mt-1">Loading...</div>;
@@ -317,13 +357,13 @@ export function MeshtasticChannelFeed({ region, channel }: { region: string; cha
       )}
 
       {/* Message feed */}
-      {messages.length > 0 ? (
+      {channelMessages.length > 0 ? (
         <>
           <div className="text-[11px] text-green-400/60 tracking-widest mb-1">
             MESSAGES — {channel} ({region})
           </div>
           <div className="max-h-[140px] overflow-y-auto space-y-0.5 scrollbar-thin">
-            {messages.map((m: MeshtasticMessage, i: number) => {
+            {channelMessages.map((m: MeshtasticMessage, i: number) => {
               const directedToYou =
                 !!publicMeshAddress &&
                 typeof m.to === 'string' &&

@@ -91,6 +91,9 @@ export interface WormholeDmInviteExport {
   peer_id: string;
   trust_fingerprint: string;
   invite: WormholeDmInviteEnvelope;
+  prekey_publish_pending?: boolean;
+  prekey_registration?: Record<string, unknown>;
+  detail?: string;
 }
 
 export interface WormholeDmInviteImportResult {
@@ -99,7 +102,47 @@ export interface WormholeDmInviteImportResult {
   trust_fingerprint: string;
   trust_level: string;
   detail?: string;
+  pending_prekey?: boolean;
+  prekey_detail?: string;
   contact: Record<string, unknown>;
+}
+
+export interface WormholeDmAddressRecord {
+  handle: string;
+  label: string;
+  issued_at: number;
+  expires_at: number;
+  max_uses: number;
+  use_count: number;
+  remaining_uses: number;
+  last_used_at: number;
+  expired: boolean;
+  exhausted: boolean;
+  revoked?: boolean;
+}
+
+export interface WormholeDmInviteHandlesResponse {
+  ok: boolean;
+  addresses: WormholeDmAddressRecord[];
+  detail?: string;
+}
+
+export interface WormholeDmInviteHandleRevokeResult {
+  ok: boolean;
+  handle: string;
+  revoked: boolean;
+  identity_removed?: boolean;
+  relay_removed?: boolean;
+  republished?: boolean;
+  detail?: string;
+}
+
+export interface WormholeDmInviteHandleUpdateResult {
+  ok: boolean;
+  handle: string;
+  label: string;
+  updated: boolean;
+  detail?: string;
 }
 
 export type WormholeDmInviteImportFailure = Partial<WormholeDmInviteImportResult> & {
@@ -840,7 +883,7 @@ export async function prepareWormholeInteractiveLane(
     let settings = await fetchWormholeSettings(true).catch(() => null);
     if (!runtime?.ready) {
       if (settings?.enabled || runtime?.configured) {
-        runtime = await connectWormhole().catch((error) => {
+        runtime = await connectWormhole({ requireAdminSession: false }).catch((error) => {
           throw new Error(
             normalizeWormholeInteractivePrepError(
               error instanceof Error ? error.message : 'wormhole_connect_failed',
@@ -939,10 +982,68 @@ export async function fetchWormholeIdentity(): Promise<WormholeIdentity> {
   return value;
 }
 
-export async function exportWormholeDmInvite(): Promise<WormholeDmInviteExport> {
-  return controlPlaneJson<WormholeDmInviteExport>('/api/wormhole/dm/invite', {
+export async function exportWormholeDmInvite(options: {
+  label?: string;
+  expiresInSeconds?: number;
+} = {}): Promise<WormholeDmInviteExport> {
+  const params = new URLSearchParams();
+  if (options.label?.trim()) {
+    params.set('label', options.label.trim());
+  }
+  if (options.expiresInSeconds && options.expiresInSeconds > 0) {
+    params.set('expires_in_s', String(Math.floor(options.expiresInSeconds)));
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  return controlPlaneJson<WormholeDmInviteExport>(`/api/wormhole/dm/invite${suffix}`, {
     requireAdminSession: false,
   });
+}
+
+export async function listWormholeDmInviteHandles(): Promise<WormholeDmInviteHandlesResponse> {
+  return controlPlaneJson<WormholeDmInviteHandlesResponse>('/api/wormhole/dm/invite/handles', {
+    requireAdminSession: false,
+  });
+}
+
+export async function revokeWormholeDmInviteHandle(
+  handle: string,
+): Promise<WormholeDmInviteHandleRevokeResult> {
+  const response = await controlPlaneFetch(
+    `/api/wormhole/dm/invite/handles/${encodeURIComponent(handle)}`,
+    {
+      method: 'DELETE',
+      requireAdminSession: false,
+    },
+  );
+  const data = (await response.json().catch(() => ({}))) as WormholeDmInviteHandleRevokeResult & {
+    message?: string;
+  };
+  if (!response.ok || data?.ok === false) {
+    throw new Error(String(data?.detail || data?.message || 'DM address revoke failed'));
+  }
+  return data;
+}
+
+export async function renameWormholeDmInviteHandle(
+  handle: string,
+  label: string,
+): Promise<WormholeDmInviteHandleUpdateResult> {
+  const response = await controlPlaneFetch(
+    `/api/wormhole/dm/invite/handles/${encodeURIComponent(handle)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+      requireAdminSession: false,
+    },
+  );
+  const data = (await response.json().catch(() => ({}))) as WormholeDmInviteHandleUpdateResult & {
+    message?: string;
+  };
+  if (!response.ok || data?.ok === false) {
+    throw new Error(String(data?.detail || data?.message || 'DM address label update failed'));
+  }
+  return data;
 }
 
 export async function importWormholeDmInvite(
@@ -956,6 +1057,7 @@ export async function importWormholeDmInvite(
       invite,
       alias,
     }),
+    requireAdminSession: false,
   });
   const data = (await response.json().catch(() => ({}))) as WormholeDmInviteImportResult & {
     message?: string;
@@ -991,7 +1093,9 @@ export function getWormholeDmInviteImportErrorResult(
 }
 
 export async function fetchWormholeDmRootHealth(): Promise<WormholeDmRootHealth> {
-  return controlPlaneJson<WormholeDmRootHealth>('/api/wormhole/dm/root-health');
+  return controlPlaneJson<WormholeDmRootHealth>('/api/wormhole/dm/root-health', {
+    requireAdminSession: false,
+  });
 }
 
 export async function bootstrapWormholeIdentity(): Promise<WormholeIdentity> {
@@ -1659,7 +1763,8 @@ export async function registerWormholeDmKey(): Promise<WormholeIdentity & { ok: 
   return controlPlaneJson<WormholeIdentity & { ok: boolean; detail?: string }>(
     '/api/wormhole/dm/register-key',
     {
-    method: 'POST',
+      method: 'POST',
+      requireAdminSession: false,
     },
   );
 }
@@ -1671,6 +1776,7 @@ export async function issueWormholeDmSenderToken(
 ): Promise<WormholeDmSenderToken> {
   return controlPlaneJson<WormholeDmSenderToken>('/api/wormhole/dm/sender-token', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       recipient_id: recipientId,
@@ -1688,6 +1794,7 @@ export async function issueWormholeDmSenderTokens(
 ): Promise<WormholeDmSenderTokenBatch> {
   return controlPlaneJson<WormholeDmSenderTokenBatch>('/api/wormhole/dm/sender-token', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       recipient_id: recipientId,
@@ -1715,6 +1822,7 @@ export async function openWormholeSenderSeal(
 ): Promise<WormholeOpenedSeal> {
   return controlPlaneJson<WormholeOpenedSeal>('/api/wormhole/dm/open-seal', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       sender_seal: senderSeal,
@@ -1733,6 +1841,7 @@ export async function buildWormholeSenderSeal(
 ): Promise<WormholeBuiltSeal> {
   return controlPlaneJson<WormholeBuiltSeal>('/api/wormhole/dm/build-seal', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       recipient_id: recipientId,
@@ -1750,6 +1859,7 @@ export async function deriveWormholeDeadDropTokenPair(
 ): Promise<WormholeDeadDropTokenPair> {
   return controlPlaneJson<WormholeDeadDropTokenPair>('/api/wormhole/dm/dead-drop-token', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       peer_id: peerId,
@@ -1765,6 +1875,7 @@ export async function issueWormholePairwiseAlias(
 ): Promise<WormholePairwiseAlias> {
   return controlPlaneJson<WormholePairwiseAlias>('/api/wormhole/dm/pairwise-alias', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       peer_id: peerId,
@@ -1780,6 +1891,7 @@ export async function rotateWormholePairwiseAlias(
 ): Promise<WormholeRotatedPairwiseAlias> {
   return controlPlaneJson<WormholeRotatedPairwiseAlias>('/api/wormhole/dm/pairwise-alias/rotate', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       peer_id: peerId,
@@ -1795,6 +1907,7 @@ export async function deriveWormholeDeadDropTokens(
 ): Promise<WormholeDeadDropTokensBatch> {
   return controlPlaneJson<WormholeDeadDropTokensBatch>('/api/wormhole/dm/dead-drop-tokens', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contacts,
@@ -1811,6 +1924,7 @@ export async function deriveWormholeSasPhrase(
 ): Promise<WormholeSasPhrase> {
   return controlPlaneJson<WormholeSasPhrase>('/api/wormhole/dm/sas', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       peer_id: peerId,
@@ -1829,6 +1943,7 @@ export async function confirmWormholeSasVerification(
 ): Promise<WormholeSasConfirmResult> {
   return controlPlaneJson<WormholeSasConfirmResult>('/api/wormhole/dm/sas/confirm', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       peer_id: peerId,
@@ -1844,6 +1959,7 @@ export async function acknowledgeWormholeSasFingerprint(
 ): Promise<WormholeSasConfirmResult> {
   return controlPlaneJson<WormholeSasConfirmResult>('/api/wormhole/dm/sas/acknowledge', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       peer_id: peerId,
@@ -1859,6 +1975,7 @@ export async function recoverWormholeSasRootContinuity(
 ): Promise<WormholeSasConfirmResult> {
   return controlPlaneJson<WormholeSasConfirmResult>('/api/wormhole/dm/sas/recover-root', {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       peer_id: peerId,
@@ -1870,7 +1987,9 @@ export async function recoverWormholeSasRootContinuity(
 }
 
 export async function listWormholeDmContacts(): Promise<WormholeDmContactsResponse> {
-  return controlPlaneJson<WormholeDmContactsResponse>('/api/wormhole/dm/contacts');
+  return controlPlaneJson<WormholeDmContactsResponse>('/api/wormhole/dm/contacts', {
+    requireAdminSession: false,
+  });
 }
 
 export async function putWormholeDmContact(
@@ -1879,6 +1998,7 @@ export async function putWormholeDmContact(
 ): Promise<{ ok: boolean; peer_id: string; contact: Record<string, unknown> }> {
   return controlPlaneJson('/api/wormhole/dm/contact', {
     method: 'PUT',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       peer_id: peerId,
@@ -1892,6 +2012,7 @@ export async function deleteWormholeDmContact(
 ): Promise<{ ok: boolean; peer_id: string; deleted: boolean }> {
   return controlPlaneJson(`/api/wormhole/dm/contact/${encodeURIComponent(peerId)}`, {
     method: 'DELETE',
+    requireAdminSession: false,
   });
 }
 

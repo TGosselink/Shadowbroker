@@ -5,7 +5,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 
-def _request(path: str, method: str = "POST") -> Request:
+def _request(path: str, method: str = "POST", query_string: bytes = b"") -> Request:
     return Request(
         {
             "type": "http",
@@ -13,6 +13,7 @@ def _request(path: str, method: str = "POST") -> Request:
             "client": ("test", 12345),
             "method": method,
             "path": path,
+            "query_string": query_string,
         }
     )
 
@@ -501,6 +502,61 @@ def test_private_infonet_gate_write_returns_preparing_state_when_wormhole_not_re
         assert payload.get("ok") is True
         assert payload.get("pending") is True
         assert payload.get("status") == "preparing_private_lane"
+    get_settings.cache_clear()
+
+
+def test_invite_scoped_prekey_lookup_reaches_handler_while_lane_prepares(monkeypatch):
+    """Copied-address import must not be blocked by private-lane warmup."""
+    import main
+    import auth
+    from services.config import get_settings
+    from services import wormhole_supervisor
+
+    monkeypatch.setenv("MESH_PRIVATE_CLEARNET_FALLBACK", "block")
+    monkeypatch.setenv("MESH_BLOCK_LEGACY_NODE_ID_COMPAT", "true")
+    monkeypatch.setenv("MESH_BLOCK_LEGACY_AGENT_ID_LOOKUP", "true")
+    monkeypatch.setenv("MESH_ALLOW_COMPAT_DM_INVITE_IMPORT", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        auth,
+        "_anonymous_mode_state",
+        lambda: {
+            "enabled": False,
+            "wormhole_enabled": True,
+            "ready": False,
+            "effective_transport": "direct",
+        },
+    )
+    monkeypatch.setattr(
+        wormhole_supervisor,
+        "get_wormhole_state",
+        lambda: {
+            "configured": True,
+            "ready": False,
+            "rns_ready": False,
+            "arti_ready": False,
+        },
+    )
+
+    called = {"value": False}
+
+    async def call_next(_request: Request) -> Response:
+        called["value"] = True
+        return Response(status_code=200)
+
+    response = asyncio.run(
+        main.enforce_high_privacy_mesh(
+            _request(
+                "/api/mesh/dm/prekey-bundle",
+                method="GET",
+                query_string=b"lookup_token=invite-handle",
+            ),
+            call_next,
+        )
+    )
+
+    assert response.status_code == 200
+    assert called["value"] is True
     get_settings.cache_clear()
 
 

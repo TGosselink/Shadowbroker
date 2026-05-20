@@ -7,6 +7,7 @@ No API key required — the /threats endpoint is unauthenticated.
 """
 
 import logging
+import os
 
 from services.network_utils import fetch_with_curl
 from services.fetchers._store import latest_data, _data_lock, _mark_fresh, is_any_active
@@ -15,6 +16,16 @@ from services.fetchers.retry import with_retry
 logger = logging.getLogger("services.data_fetcher")
 
 _CT_BASE = "https://backend.crowdthreat.world"
+
+
+def crowdthreat_fetch_enabled() -> bool:
+    """Return True only when the operator explicitly opts into CrowdThreat pulls."""
+    return str(os.environ.get("CROWDTHREAT_ENABLED", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 # CrowdThreat category_id → icon ID used on the MapLibre layer
 _CATEGORY_ICON = {
@@ -43,6 +54,12 @@ _CATEGORY_COLOUR = {
 @with_retry(max_retries=2, base_delay=5)
 def fetch_crowdthreat():
     """Fetch verified threat reports from CrowdThreat public API."""
+    if not crowdthreat_fetch_enabled():
+        logger.debug("CrowdThreat fetch skipped; set CROWDTHREAT_ENABLED=true to opt in")
+        with _data_lock:
+            latest_data["crowdthreat"] = []
+        _mark_fresh("crowdthreat")
+        return
     if not is_any_active("crowdthreat"):
         return
 

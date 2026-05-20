@@ -132,6 +132,13 @@ async def api_get_node_settings(request: Request):
 @limiter.limit("10/minute")
 async def api_set_node_settings(request: Request, body: NodeSettingsUpdate):
     _refresh_node_peer_store()
+    if bool(body.enabled):
+        try:
+            from services.transport_lane_isolation import disable_public_mesh_lane
+
+            disable_public_mesh_lane(reason="private_node_enabled")
+        except Exception as exc:
+            logger.warning("Failed to disable public Mesh while enabling private node: %s", exc)
     result = _set_participant_node_enabled(bool(body.enabled))
     if bool(body.enabled):
         try:
@@ -174,17 +181,22 @@ async def api_set_meshtastic_mqtt_settings(request: Request, body: MeshtasticMqt
 
     enabled_requested = updates.get("enabled")
     settings = write_meshtastic_mqtt_settings(**updates)
+    if isinstance(enabled_requested, bool):
+        logger.info("Meshtastic MQTT settings update: enabled=%s", enabled_requested)
 
     if enabled_requested is True:
         # Public MQTT and Wormhole are intentionally mutually exclusive lanes.
         try:
+            from services.node_settings import write_node_settings
             from services.wormhole_settings import write_wormhole_settings
             from services.wormhole_supervisor import disconnect_wormhole
 
             write_wormhole_settings(enabled=False)
             disconnect_wormhole(reason="public_mesh_enabled")
+            write_node_settings(enabled=False)
+            _set_participant_node_enabled(False)
         except Exception as exc:
-            logger.warning("Failed to disable Wormhole while enabling public mesh: %s", exc)
+            logger.warning("Failed to disable private mesh lane while enabling public mesh: %s", exc)
 
     if bool(settings.get("enabled")):
         if sigint_grid.mesh.is_running():
@@ -357,8 +369,8 @@ async def api_reset_all_agent_credentials(request: Request):
 
     return {
         "ok": True,
-        "new_hmac_secret": new_secret,
-        "detail": "All agent credentials have been reset. Reconfigure your agent with the new credentials.",
+        "hmac_regenerated": True,
+        "detail": "All agent credentials have been reset. Use the agent connection screen to generate or reveal replacement credentials.",
         **results,
     }
 

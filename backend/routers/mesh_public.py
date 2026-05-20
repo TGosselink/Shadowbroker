@@ -721,9 +721,11 @@ async def mesh_send(request: Request):
     any_ok = any(r.ok for r in results)
 
     # ─── Mirror to Meshtastic bridge feed ────────────────────────
-    # The MQTT broker won't echo our own publishes back to our subscriber,
-    # so inject successfully-sent messages into the bridge's deque directly.
-    if any_ok and envelope.routed_via == "meshtastic":
+    # The MQTT broker won't echo our own publishes back to our subscriber, so
+    # inject successfully-sent channel broadcasts into the bridge directly.
+    # Node-targeted packets must not appear in the public channel feed.
+    is_direct_destination = MeshtasticTransport._parse_node_id(destination) is not None
+    if any_ok and envelope.routed_via == "meshtastic" and not is_direct_destination:
         try:
             from services.sigint_bridge import sigint_grid
 
@@ -734,7 +736,7 @@ async def mesh_send(request: Request):
                 bridge.messages.appendleft(
                     {
                         "from": MeshtasticTransport.mesh_address_for_sender(node_id),
-                        "to": destination if MeshtasticTransport._parse_node_id(destination) is not None else "broadcast",
+                        "to": "broadcast",
                         "text": message,
                         "region": credentials.get("mesh_region", "US"),
                         "channel": body.get("channel", "LongFast"),
@@ -750,6 +752,8 @@ async def mesh_send(request: Request):
         "event_id": "",
         "routed_via": envelope.routed_via,
         "route_reason": envelope.route_reason,
+        "direct": is_direct_destination,
+        "channel_echo": not is_direct_destination,
         "results": [r.to_dict() for r in results],
     }
 
@@ -818,9 +822,10 @@ async def meshtastic_public_send(request: Request):
         if not cb_ok:
             results = [TransportResult(False, "meshtastic", cb_reason)]
         else:
+            is_direct_destination = MeshtasticTransport._parse_node_id(destination) is not None
             envelope.route_reason = (
                 "Local public Meshtastic MQTT path"
-                if MeshtasticTransport._parse_node_id(destination) is None
+                if not is_direct_destination
                 else "Local public Meshtastic direct node path"
             )
             credentials = {"mesh_region": str(body.get("mesh_region", "US") or "US")}
@@ -830,23 +835,28 @@ async def meshtastic_public_send(request: Request):
             results = [result]
 
     any_ok = any(r.ok for r in results)
-    if any_ok and envelope.routed_via == "meshtastic":
+    is_direct_destination = MeshtasticTransport._parse_node_id(destination) is not None
+    if any_ok and envelope.routed_via == "meshtastic" and not is_direct_destination:
         try:
             from datetime import datetime
             from services.sigint_bridge import sigint_grid
 
             bridge = sigint_grid.mesh
             if bridge:
-                bridge.messages.appendleft(
-                    {
-                        "from": MeshtasticTransport.mesh_address_for_sender(sender_id),
-                        "to": destination if MeshtasticTransport._parse_node_id(destination) is not None else "broadcast",
-                        "text": message,
-                        "region": str(body.get("mesh_region", "US") or "US"),
-                        "channel": str(body.get("channel", "LongFast") or "LongFast"),
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
-                    }
-                )
+                record = {
+                    "from": MeshtasticTransport.mesh_address_for_sender(sender_id),
+                    "to": "broadcast",
+                    "text": message,
+                    "region": str(body.get("mesh_region", "US") or "US"),
+                    "root": str(body.get("mesh_region", "US") or "US"),
+                    "channel": str(body.get("channel", "LongFast") or "LongFast"),
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+                append_text = getattr(bridge, "append_text_message", None)
+                if callable(append_text):
+                    append_text(record)
+                else:
+                    bridge.messages.appendleft(record)
         except Exception:
             pass
 
@@ -856,6 +866,8 @@ async def meshtastic_public_send(request: Request):
         "event_id": "",
         "routed_via": envelope.routed_via,
         "route_reason": envelope.route_reason,
+        "direct": is_direct_destination,
+        "channel_echo": not is_direct_destination,
         "results": [r.to_dict() for r in results],
     }
 
@@ -954,6 +966,7 @@ async def mesh_messages(
     root: str = "",
     channel: str = "",
     limit: int = 30,
+    include_direct: bool = False,
 ):
     """Get recent Meshtastic text messages from the MQTT bridge."""
     from services.sigint_bridge import sigint_grid
@@ -975,6 +988,12 @@ async def mesh_messages(
         msgs = [m for m in msgs if m.get("root", "").upper() == root_filter]
     if channel:
         msgs = [m for m in msgs if m.get("channel", "").lower() == channel.lower()]
+    if not include_direct:
+        msgs = [
+            m
+            for m in msgs
+            if str(m.get("to") or "broadcast").strip().lower() in {"", "broadcast", "^all"}
+        ]
     return msgs[: min(limit, 100)]
 
 

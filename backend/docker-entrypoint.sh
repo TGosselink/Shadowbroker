@@ -14,4 +14,9 @@ if [ -d /app/image-data ]; then
   done
 fi
 
+if [ -z "${PRIVACY_CORE_ALLOWED_SHA256:-}" ] && [ -f /app/libprivacy_core.so ]; then
+  PRIVACY_CORE_ALLOWED_SHA256="$(sha256sum /app/libprivacy_core.so | awk '{print $1}')"
+  export PRIVACY_CORE_ALLOWED_SHA256
+fi
+
 exec "$@"

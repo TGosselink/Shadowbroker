@@ -113,10 +113,13 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
     meshQuickStatus,
     meshSessionActive,
     publicMeshAddress,
+    activePublicMeshAddress,
     meshView,
     setMeshView,
     meshDirectTarget,
     setMeshDirectTarget,
+    meshAddressDraft,
+    setMeshAddressDraft,
     meshMqttSettings,
     meshMqttForm,
     setMeshMqttForm,
@@ -133,6 +136,7 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
     publicIdentity,
     hasStoredPublicLaneIdentity,
     hasPublicLaneIdentity,
+    canUsePublicMeshInput,
     hasId,
     shouldShowIdentityWarning,
     wormholeEnabled,
@@ -339,14 +343,13 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
     void handleRequestAccess(targetId);
   };
   const meshActivationText =
-    meshQuickStatus?.text ||
-    (publicMeshBlockedByWormhole
+    publicMeshBlockedByWormhole
       ? hasStoredPublicLaneIdentity
         ? 'Wormhole is active. Turning MeshChat on will turn Wormhole off and use your saved public mesh key.'
         : 'Wormhole is active. Turning MeshChat on will turn Wormhole off and mint a separate public mesh key.'
       : hasStoredPublicLaneIdentity
         ? 'MeshChat is off. Turn it on to use your saved public mesh key.'
-        : 'Public mesh posting needs a mesh key. One tap gets you a fresh address.');
+        : 'Public mesh posting needs a mesh key. One tap gets you a fresh address.';
   const handleMeshActivationAction = () => {
     if (hasStoredPublicLaneIdentity) {
       void handleActivatePublicMeshSession();
@@ -357,6 +360,21 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
       return;
     }
     void handleQuickCreatePublicIdentity();
+  };
+  const normalizeMeshDirectAddress = (value: string) => {
+    const compact = value.trim().replace(/^!/, '').toLowerCase();
+    return /^[0-9a-f]{8}$/.test(compact) ? `!${compact}` : '';
+  };
+  const handleMeshDirectTargetSubmit = () => {
+    const target = normalizeMeshDirectAddress(meshAddressDraft);
+    if (!target) {
+      setSendError('enter node address like !1ee21986');
+      window.setTimeout(() => setSendError(''), 4000);
+      return;
+    }
+    setMeshDirectTarget(target);
+    setMeshView('channel');
+    window.setTimeout(() => inputRef.current?.focus(), 0);
   };
   const meshActivationLabel = identityWizardBusy
     ? 'GETTING MESH KEY'
@@ -482,7 +500,7 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
               </div>
             )}
 
-            {anonymousModeEnabled && !anonymousModeReady && (
+            {activeTab !== 'meshtastic' && anonymousModeEnabled && !anonymousModeReady && (
               <div className="px-3 py-2 text-sm font-mono text-red-400/90 border-b border-red-900/30 bg-red-950/20 leading-[1.65] shrink-0">
                 Anonymous mode is active, but hidden transport is not ready. Dead Drop is blocked
                 until Wormhole is running over Tor, I2P, or Mixnet.
@@ -1144,8 +1162,8 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                       ))}
                     </select>
                   </div>
-                  <div className="flex items-center justify-between gap-2 px-3 py-1 border-b border-[var(--border-primary)]/20 shrink-0 bg-green-950/10">
-                    <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1 px-3 py-1 border-b border-[var(--border-primary)]/20 shrink-0 bg-green-950/10">
+                    <div className="flex items-center gap-1 min-w-0 flex-wrap">
                       <button
                         onClick={() => setMeshView('channel')}
                         className={`px-2 py-0.5 text-[11px] font-mono tracking-wider border transition-colors ${
@@ -1176,24 +1194,71 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                       >
                         SETTINGS
                       </button>
-                    </div>
-                    <div
-                      className={`text-[10px] font-mono truncate ${
-                        meshMqttConnected
-                          ? 'text-green-300/80'
-                          : meshMqttEnabled
-                            ? 'text-amber-300/80'
-                            : 'text-[var(--text-muted)]'
-                      }`}
-                    >
-                      {meshSessionActive && publicMeshAddress
-                        ? `${meshMqttConnectionLabel} / ADDR ${publicMeshAddress.toUpperCase()}`
-                        : publicMeshAddress
-                          ? `${meshMqttConnectionLabel} / KEY SAVED`
-                          : `${meshMqttConnectionLabel} / NO ADDRESS`}
+                      <button
+                        onClick={() => {
+                          setMeshAddressDraft(meshDirectTarget || '');
+                          setMeshView('message');
+                        }}
+                        className={`px-2 py-0.5 text-[11px] font-mono tracking-wider border transition-colors ${
+                          meshView === 'message'
+                            ? 'border-green-500/40 text-green-200 bg-green-950/25'
+                            : 'border-[var(--border-primary)]/40 text-[var(--text-muted)] hover:text-green-300'
+                        }`}
+                      >
+                        MESSAGE
+                      </button>
                     </div>
                   </div>
                   <div className="flex-1 overflow-y-auto styled-scrollbar px-3 py-1.5 border-l-2 border-cyan-800/25">
+                    {meshView === 'message' && (
+                      <div className="space-y-2 py-1 text-[11px] font-mono">
+                        <div className="border border-green-700/35 bg-green-950/10 p-2">
+                          <div className="text-green-300 tracking-[0.18em]">DIRECT MESHTASTIC MESSAGE</div>
+                          <div className="mt-1 text-[10px] text-[var(--text-muted)] leading-[1.5]">
+                            Enter a public Meshtastic node address. Direct MQTT publishes are public/degraded and depend on the target mesh hearing the broker bridge.
+                          </div>
+                        </div>
+                        <label className="block space-y-1">
+                          <span className="text-[var(--text-muted)]">NODE ADDRESS</span>
+                          <input
+                            value={meshAddressDraft}
+                            onChange={(e) => setMeshAddressDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleMeshDirectTargetSubmit();
+                              }
+                            }}
+                            placeholder="!1ee21986"
+                            className="w-full border border-[var(--border-primary)] bg-black/30 px-2 py-1 text-green-200 outline-none placeholder:text-[var(--text-muted)] focus:border-green-500/50"
+                          />
+                        </label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            onClick={handleMeshDirectTargetSubmit}
+                            className="border border-green-600/45 bg-green-950/20 px-2 py-1.5 text-green-300 hover:bg-green-950/35"
+                          >
+                            USE ADDRESS
+                          </button>
+                          <button
+                            onClick={() => {
+                              setMeshDirectTarget('');
+                              setMeshAddressDraft('');
+                              setMeshView('channel');
+                              window.setTimeout(() => inputRef.current?.focus(), 0);
+                            }}
+                            className="border border-cyan-700/40 bg-cyan-950/15 px-2 py-1.5 text-cyan-300 hover:bg-cyan-950/25"
+                          >
+                            BROADCAST
+                          </button>
+                        </div>
+                        {meshDirectTarget && (
+                          <div className="border border-amber-600/30 bg-amber-950/10 p-2 text-amber-200/85 leading-[1.5]">
+                            Active direct target: {meshDirectTarget.toUpperCase()}. Type in the input below and press send, or clear it to return to channel broadcast.
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {meshView === 'settings' && (
                       <div className="space-y-2 py-1 text-[11px] font-mono">
                         <div className="border border-cyan-800/35 bg-cyan-950/10 p-2">
@@ -1338,26 +1403,26 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                         )}
                       </div>
                     )}
-                    {!meshSessionActive && meshView !== 'settings' && (
+                    {!canUsePublicMeshInput && meshView !== 'settings' && (
                       <div className="text-[12px] font-mono text-green-300/70 text-center py-4 leading-[1.65]">
                         MeshChat is off. Turn it on to connect the public mesh lane.
                       </div>
                     )}
-                    {meshSessionActive && meshView === 'channel' && filteredMeshMessages.length === 0 && (
+                    {canUsePublicMeshInput && meshView === 'channel' && filteredMeshMessages.length === 0 && (
                       <div className="text-[12px] font-mono text-[var(--text-muted)] text-center py-4 leading-[1.65]">
                         No messages from {meshRegion} / {meshChannel}
                       </div>
                     )}
-                    {meshSessionActive && meshView === 'inbox' && (
+                    {canUsePublicMeshInput && meshView === 'inbox' && (
                       <>
-                        {!publicMeshAddress && (
+                        {!activePublicMeshAddress && (
                           <div className="text-[12px] font-mono text-[var(--text-muted)] text-center py-4 leading-[1.65]">
                             Create or load a public mesh identity to see direct Meshtastic traffic.
                           </div>
                         )}
-                        {publicMeshAddress && meshInboxMessages.length === 0 && (
+                        {activePublicMeshAddress && meshInboxMessages.length === 0 && (
                           <div className="text-[12px] font-mono text-[var(--text-muted)] text-center py-4 leading-[1.65]">
-                            No public direct messages addressed to {publicMeshAddress.toUpperCase()} yet.
+                            No public direct messages addressed to {activePublicMeshAddress.toUpperCase()} yet.
                           </div>
                         )}
                         {meshInboxMessages.map((m, i) => (
@@ -1371,7 +1436,7 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                               </button>
                               <div className="flex-1 min-w-0">
                                 <div className="text-[10px] text-amber-200/70 mb-0.5">
-                                  TO {publicMeshAddress.toUpperCase()}
+                                  TO {activePublicMeshAddress.toUpperCase()}
                                 </div>
                                 <div className="break-words whitespace-pre-wrap text-amber-100/90">
                                   {m.text}
@@ -2264,10 +2329,12 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                         ? `→ INFONET${selectedGate ? ` / ${selectedGate}` : ''}${privateInfonetTransportReady ? '' : ' / EXPERIMENTAL ENCRYPTION'}`
                         : '→ PRIVATE LANE LOCKED'
                       : activeTab === 'meshtastic'
-                        ? hasPublicLaneIdentity
+                        ? canUsePublicMeshInput
                           ? meshDirectTarget
-                            ? `→ MESH / TO ${meshDirectTarget.toUpperCase()}`
-                            : `→ MESH / ${meshRegion} / ${meshChannel}`
+                            ? `→ MESH / TO ${meshDirectTarget.toUpperCase()} / FROM ${activePublicMeshAddress.toUpperCase()}`
+                            : `→ MESH / ${meshRegion} / ${meshChannel} / ${activePublicMeshAddress.toUpperCase()}`
+                          : publicMeshBlockedByWormhole
+                            ? '→ MESH BLOCKED / WORMHOLE ACTIVE'
                           : hasStoredPublicLaneIdentity
                             ? '→ MESH OFF'
                             : '→ MESH LOCKED'
@@ -2279,7 +2346,7 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                   </span>
                 )}
               </div>
-              {activeTab === 'meshtastic' && !hasPublicLaneIdentity && !sendError && (
+              {activeTab === 'meshtastic' && !sendError && (!canUsePublicMeshInput || meshQuickStatus) && (
                 <div
                   className={`px-3 pt-1 text-[12px] font-mono leading-[1.5] ${
                     meshQuickStatus?.type === 'err'
@@ -2289,7 +2356,7 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                         : 'text-green-300/70'
                   }`}
                 >
-                  {meshActivationText}
+                  {meshQuickStatus?.text || meshActivationText}
                 </div>
               )}
               <div className="flex items-center gap-2 px-3 pb-2 pt-1">
@@ -2319,7 +2386,7 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                       NEED WORMHOLE
                     </span>
                   </button>
-                ) : activeTab === 'meshtastic' && !hasPublicLaneIdentity ? (
+                ) : activeTab === 'meshtastic' && !canUsePublicMeshInput ? (
                   <button
                     onClick={handleMeshActivationAction}
                     disabled={identityWizardBusy}
@@ -2335,7 +2402,10 @@ const MeshChat = React.memo(function MeshChat(props: MeshChatProps) {
                   </button>
                 ) : activeTab === 'meshtastic' && meshDirectTarget ? (
                   <button
-                    onClick={() => setMeshDirectTarget('')}
+                    onClick={() => {
+                      setMeshDirectTarget('');
+                      setMeshAddressDraft('');
+                    }}
                     className="w-full flex items-center justify-between gap-2 px-3 py-2 border border-amber-700/40 bg-amber-950/10 text-amber-200 hover:bg-amber-950/20 hover:border-amber-500/50 transition-colors"
                   >
                     <span className="inline-flex items-center gap-2 text-sm font-mono tracking-[0.2em]">

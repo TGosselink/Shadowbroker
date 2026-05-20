@@ -12,6 +12,7 @@ Tests verify:
 """
 
 import hashlib
+import json
 import time
 
 from services.config import get_settings
@@ -610,6 +611,99 @@ class TestFetchPrekeyBundleByLookup:
             "Prekey bundle not found",
             "peer prekey lookup unavailable",
         }
+
+    def test_fetch_lookup_token_uses_bootstrap_peer_without_agent_id(self, tmp_path, monkeypatch):
+        """Invite lookup can resolve through bootstrap peers without exposing agent_id."""
+        _isolated_relay(tmp_path, monkeypatch)
+        record = _valid_bundle_record("test-agent")
+        requested_urls: list[str] = []
+
+        monkeypatch.setenv("MESH_BOOTSTRAP_SEED_PEERS", "https://seed.example")
+        monkeypatch.setenv("MESH_DEFAULT_SYNC_PEERS", "")
+        monkeypatch.setenv("MESH_RELAY_PEERS", "")
+        get_settings.cache_clear()
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit: int = -1):
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "identity_dh_pub_key": record["dh_pub_key"],
+                        "dh_algo": record["dh_algo"],
+                        "public_key": record["public_key"],
+                        "public_key_algo": record["public_key_algo"],
+                        "protocol_version": record["protocol_version"],
+                        "sequence": 1,
+                        "signed_at": int(record["bundle"].get("signed_at", 0) or 0),
+                        "bundle": record["bundle"],
+                    }
+                ).encode("utf-8")
+
+        def _urlopen(request, timeout=0):
+            requested_urls.append(str(getattr(request, "full_url", "")))
+            return _Response()
+
+        monkeypatch.setattr("services.mesh.mesh_wormhole_prekey.urllib.request.urlopen", _urlopen)
+
+        from services.mesh.mesh_wormhole_prekey import fetch_dm_prekey_bundle
+
+        result = fetch_dm_prekey_bundle(agent_id="", lookup_token="bootstrap-handle")
+
+        assert result["ok"] is True
+        assert result["agent_id"] == record["agent_id"]
+        assert result["lookup_mode"] == "invite_lookup_handle"
+        assert result["public_lookup"] is True
+        assert requested_urls
+        assert "lookup_token=bootstrap-handle" in requested_urls[0]
+        assert "agent_id" not in requested_urls[0]
+
+    def test_fetch_lookup_token_does_not_parse_peer_pending_as_bundle(self, tmp_path, monkeypatch):
+        """A peer's private-lane pending response is not a malformed prekey bundle."""
+        _isolated_relay(tmp_path, monkeypatch)
+        requested_urls: list[str] = []
+
+        monkeypatch.setenv("MESH_BOOTSTRAP_SEED_PEERS", "https://seed.example")
+        monkeypatch.setenv("MESH_DEFAULT_SYNC_PEERS", "")
+        monkeypatch.setenv("MESH_RELAY_PEERS", "")
+        get_settings.cache_clear()
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit: int = -1):
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "pending": True,
+                        "status": "preparing_private_lane",
+                        "detail": "transport tier insufficient",
+                    }
+                ).encode("utf-8")
+
+        def _urlopen(request, timeout=0):
+            requested_urls.append(str(getattr(request, "full_url", "")))
+            return _Response()
+
+        monkeypatch.setattr("services.mesh.mesh_wormhole_prekey.urllib.request.urlopen", _urlopen)
+
+        from services.mesh.mesh_wormhole_prekey import fetch_dm_prekey_bundle
+
+        result = fetch_dm_prekey_bundle(agent_id="", lookup_token="bootstrap-handle")
+
+        assert requested_urls
+        assert result["ok"] is False
+        assert result["detail"] == "peer prekey lookup still preparing"
+        assert result["detail"] != "Prekey bundle missing signing key"
 
     def test_fetch_agent_id_uses_pinned_contact_lookup_handle(self, tmp_path, monkeypatch):
         """Pinned invite lookup handle is used before direct agent_id lookup."""

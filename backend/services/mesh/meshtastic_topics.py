@@ -108,8 +108,18 @@ def normalize_topic_filter(value: str) -> str | None:
     return "/".join(parts)
 
 
-def _default_topic_for_root(root: str) -> str:
-    return f"msh/{root}/2/e/{DEFAULT_CHANNEL}/#"
+def _default_topics_for_root(root: str) -> list[str]:
+    """Return the default LongFast subscriptions for a region root.
+
+    The public broker carries protobuf/encrypted traffic under ``/e/`` and
+    companion decoded JSON traffic under ``/json/``. Positions often arrive on
+    the protobuf path, while public text is commonly easiest to observe on the
+    JSON path.
+    """
+    return [
+        f"msh/{root}/2/e/{DEFAULT_CHANNEL}/#",
+        f"msh/{root}/2/json/{DEFAULT_CHANNEL}/#",
+    ]
 
 
 def build_subscription_topics(
@@ -124,7 +134,11 @@ def build_subscription_topics(
         # via MESH_MQTT_EXTRA_ROOTS to avoid flooding the public broker.
     roots.extend(root for root in (normalize_root(item) for item in _split_config_values(extra_roots)) if root)
 
-    topics = [_default_topic_for_root(root) for root in _dedupe(roots)]
+    topics = [
+        topic
+        for root in _dedupe(roots)
+        for topic in _default_topics_for_root(root)
+    ]
     topics.extend(
         topic
         for topic in (

@@ -266,7 +266,7 @@ async def force_refresh(request: Request):
     return {"status": "refreshing in background"}
 
 
-@router.post("/api/ais/feed")
+@router.post("/api/ais/feed", dependencies=[Depends(require_local_operator)])
 @limiter.limit("60/minute")
 async def ais_feed(request: Request):
     """Accept AIS-catcher HTTP JSON feed (POST decoded AIS messages)."""
@@ -304,7 +304,7 @@ async def update_viewport(vp: ViewportUpdate, request: Request):  # noqa: ARG001
     return {"status": "ok"}
 
 
-@router.post("/api/layers")
+@router.post("/api/layers", dependencies=[Depends(require_local_operator)])
 @limiter.limit("30/minute")
 async def update_layers(update: LayerUpdate, request: Request):
     """Receive frontend layer toggle state. Starts/stops streams accordingly."""
@@ -335,8 +335,16 @@ async def update_layers(update: LayerUpdate, request: Request):
         logger.info("AIS stream started (ship layer enabled)")
     from services.sigint_bridge import sigint_grid
     if old_mesh and not new_mesh:
-        sigint_grid.mesh.stop()
-        logger.info("Meshtastic MQTT bridge stopped (layer disabled)")
+        try:
+            from services.meshtastic_mqtt_settings import mqtt_bridge_enabled
+            keep_chat_running = mqtt_bridge_enabled()
+        except Exception:
+            keep_chat_running = False
+        if keep_chat_running:
+            logger.info("Meshtastic map layer disabled; MQTT bridge kept running for MeshChat")
+        else:
+            sigint_grid.mesh.stop()
+            logger.info("Meshtastic MQTT bridge stopped (layer disabled)")
     elif not old_mesh and new_mesh:
         try:
             from services.meshtastic_mqtt_settings import mqtt_bridge_enabled

@@ -173,6 +173,8 @@ backend/services/test_*.py
 # Local analysis & dev tools
 backend/analyze_xlsx.py
 backend/services/ais_cache.json
+graphify/
+graphify-out/
 
 # ========================
 # Internal docs & brainstorming (never commit)

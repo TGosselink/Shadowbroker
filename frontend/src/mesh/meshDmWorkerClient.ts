@@ -66,6 +66,7 @@ function callWorker(payload: Omit<WorkerRequest, 'id'> & Record<string, unknown>
 async function callWormhole(path: string, body: Record<string, unknown>): Promise<string> {
   const data = await controlPlaneJson<{ result?: string }>(path, {
     method: 'POST',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });

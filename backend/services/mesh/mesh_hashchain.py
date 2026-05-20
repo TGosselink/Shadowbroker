@@ -1438,6 +1438,7 @@ class Infonet:
         # Running counters — avoid O(N) scans in get_info()
         self._type_counts: dict[str, int] = {}
         self._active_count: int = 0
+        self._registered_nodes: set[str] = set()
         self._chain_bytes: int = 2  # Start with "[]" empty JSON array
         self._dirty = False
         self._save_lock = threading.Lock()
@@ -1518,6 +1519,7 @@ class Infonet:
         self._last_validated_index = 0
         self._type_counts = {}
         self._active_count = 0
+        self._registered_nodes = set()
         self._chain_bytes = 2
 
     def _rebuild_state(self) -> None:
@@ -1566,10 +1568,15 @@ class Infonet:
         now = time.time()
         self._type_counts = {}
         self._active_count = 0
+        self._registered_nodes = set()
         self._chain_bytes = 2  # "[]"
         for evt in self.events:
             t = evt.get("event_type", "unknown")
             self._type_counts[t] = self._type_counts.get(t, 0) + 1
+            if t == "node_register":
+                node_id = str(evt.get("node_id", "") or "")
+                if node_id:
+                    self._registered_nodes.add(node_id)
             is_eph = evt.get("payload", {}).get("ephemeral") or evt.get("payload", {}).get("_ephemeral")
             if not is_eph or (now - evt.get("timestamp", 0)) < EPHEMERAL_TTL:
                 self._active_count += 1
@@ -1579,6 +1586,10 @@ class Infonet:
         """Incrementally update counters when a new event is appended."""
         t = evt.get("event_type", "unknown")
         self._type_counts[t] = self._type_counts.get(t, 0) + 1
+        if t == "node_register":
+            node_id = str(evt.get("node_id", "") or "")
+            if node_id:
+                self._registered_nodes.add(node_id)
         self._active_count += 1
         self._chain_bytes += len(json.dumps(evt)) + 2
 
@@ -2247,6 +2258,7 @@ class Infonet:
             self.event_index[event_id] = len(self.events) - 1
             self.head_hash = event_id
             self.node_sequences[node_id] = sequence
+            self._update_counters_for_event(evt)
             accepted += 1
             expected_prev = event_id
             self._replay_filter.add(event_id)
@@ -2552,6 +2564,8 @@ class Infonet:
         # Apply fork
         self.events = prefix + ordered
         self._rebuild_state()
+        self._rebuild_revocations()
+        self._rebuild_counters()
         self._save()
         try:
             from services.mesh.mesh_metrics import increment as metrics_inc
@@ -2681,6 +2695,8 @@ class Infonet:
             "head_hash_full": self.head_hash,
             "chain_lock": self.chain_lock(),
             "known_nodes": len(self.node_sequences),
+            "author_nodes": len(self.node_sequences),
+            "registered_nodes": len(self._registered_nodes),
             "event_types": dict(self._type_counts),
             "chain_size_kb": round(self._chain_bytes / 1024, 1),
             "unsigned_events": 0,
@@ -2716,8 +2732,9 @@ class Infonet:
 
         if len(new_events) != before:
             self.events = new_events
-            # Rebuild index
-            self.event_index = {e["event_id"]: i for i, e in enumerate(self.events)}
+            self._rebuild_state()
+            self._rebuild_revocations()
+            self._rebuild_counters()
             self._save()
             logger.info(f"Infonet cleanup: removed {before - len(new_events)} expired events")
 

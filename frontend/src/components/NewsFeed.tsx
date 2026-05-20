@@ -245,147 +245,26 @@ const VESSEL_TYPE_WIKI: Record<string, string> = {
 
 type FlightTrailPoint = { lat?: number; lng?: number; alt?: number; ts?: number } | number[];
 
-function readTrailTimestamp(point: FlightTrailPoint): number | null {
-    if (Array.isArray(point)) {
-        const ts = Number(point[3]);
-        return Number.isFinite(ts) && ts > 0 ? ts : null;
-    }
-    const ts = Number(point?.ts);
-    return Number.isFinite(ts) && ts > 0 ? ts : null;
-}
-
-function readTrailLatLng(point: FlightTrailPoint): { lat: number; lng: number } | null {
-    const lat = Number(Array.isArray(point) ? point[0] : point?.lat);
-    const lng = Number(Array.isArray(point) ? point[1] : point?.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-    return { lat, lng };
-}
-
-function distanceNm(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
-    const toRad = (deg: number) => (deg * Math.PI) / 180;
-    const earthRadiusNm = 3440.065;
-    const dLat = toRad(b.lat - a.lat);
-    const dLng = toRad(b.lng - a.lng);
-    const lat1 = toRad(a.lat);
-    const lat2 = toRad(b.lat);
-    const h =
-        Math.sin(dLat / 2) ** 2 +
-        Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-    return 2 * earthRadiusNm * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
-}
-
-function formatObservedDuration(hours: number): string {
-    const minutes = Math.max(1, Math.round(hours * 60));
-    if (minutes < 60) return `${minutes} min`;
-    const wholeHours = Math.floor(minutes / 60);
-    const remainder = minutes % 60;
-    return remainder ? `${wholeHours}h ${remainder}m` : `${wholeHours}h`;
-}
-
-function estimateObservedEmissions(flight: any): {
-    fuelGallons: number;
-    co2Kg: number;
-    durationLabel: string;
-    distanceLabel: string | null;
-    basisLabel: string;
-} | null {
-    const fuelGph = Number(flight?.emissions?.fuel_gph);
-    const co2KgPerHour = Number(flight?.emissions?.co2_kg_per_hour);
-    const trail = Array.isArray(flight?.trail) ? (flight.trail as FlightTrailPoint[]) : [];
-    const isTrackedAircraft = flight?.type === 'tracked_flight' || Boolean(flight?.alert_category);
-    const minimumObservedHours = isTrackedAircraft ? 1 / 60 : 5 / 60;
-    if (!Number.isFinite(fuelGph) || !Number.isFinite(co2KgPerHour)) {
-        return null;
-    }
-
-    const timestamps = trail
-        .map(readTrailTimestamp)
-        .filter((ts): ts is number => ts !== null)
-        .sort((a, b) => a - b);
-    if (timestamps.length >= 2) {
-        const elapsedHours = (timestamps[timestamps.length - 1] - timestamps[0]) / 3600;
-        if (Number.isFinite(elapsedHours) && elapsedHours >= minimumObservedHours) {
-            let distance = 0;
-            let previous: { lat: number; lng: number } | null = null;
-            for (const point of trail) {
-                const current = readTrailLatLng(point);
-                if (previous && current) distance += distanceNm(previous, current);
-                if (current) previous = current;
-            }
-
-            return {
-                fuelGallons: Math.round(fuelGph * elapsedHours),
-                co2Kg: Math.round(co2KgPerHour * elapsedHours),
-                durationLabel: formatObservedDuration(elapsedHours),
-                distanceLabel: distance > 1 ? `${Math.round(distance).toLocaleString()} nm` : null,
-                basisLabel: 'trail history',
-            };
-        }
-    }
-
-    const origin = Array.isArray(flight?.origin_loc)
-        ? { lng: Number(flight.origin_loc[0]), lat: Number(flight.origin_loc[1]) }
-        : null;
-    const current = { lat: Number(flight?.lat), lng: Number(flight?.lng) };
-    const speedKnots = Number(flight?.speed_knots);
-    if (
-        origin &&
-        Number.isFinite(origin.lat) &&
-        Number.isFinite(origin.lng) &&
-        Number.isFinite(current.lat) &&
-        Number.isFinite(current.lng) &&
-        Number.isFinite(speedKnots) &&
-        speedKnots > 50
-    ) {
-        const flownNm = distanceNm(origin, current);
-        const elapsedHours = flownNm / speedKnots;
-        if (Number.isFinite(elapsedHours) && elapsedHours >= minimumObservedHours && elapsedHours <= 18) {
-            return {
-                fuelGallons: Math.round(fuelGph * elapsedHours),
-                co2Kg: Math.round(co2KgPerHour * elapsedHours),
-                durationLabel: formatObservedDuration(elapsedHours),
-                distanceLabel: `${Math.round(flownNm).toLocaleString()} nm`,
-                basisLabel: 'route progress',
-            };
-        }
-    }
-
-    return null;
-}
-
 function EmissionsEstimateBlock({ flight }: { flight: any }) {
-    const observed = estimateObservedEmissions(flight);
     const emissions = flight?.emissions;
-    const context = observed
-        ? `${observed.durationLabel} ${observed.basisLabel}${observed.distanceLabel ? ` / ${observed.distanceLabel}` : ''}`
-        : emissions
-            ? 'Rate only until enough trail history accumulates'
-            : null;
+    const context = emissions ? 'Model-based cruise estimate' : null;
 
     return (
         <div className="border-b border-[var(--border-primary)] pb-2">
             <span className="text-[var(--text-muted)] text-[10px] block mb-1.5">EMISSIONS ESTIMATE</span>
             <div className="flex gap-3">
                 <div className="flex-1 bg-[var(--bg-primary)]/50 border border-[var(--border-primary)] px-2 py-1.5">
-                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">
-                        {observed ? 'FUEL BURNED' : 'FUEL RATE'}
-                    </div>
+                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">FUEL RATE</div>
                     <div className="text-xs font-bold text-orange-400">
-                        {observed ? (
-                            <>{observed.fuelGallons.toLocaleString()} <span className="text-[11px] text-[var(--text-muted)] font-normal">GAL</span></>
-                        ) : emissions ? (
+                        {emissions ? (
                             <>{emissions.fuel_gph} <span className="text-[11px] text-[var(--text-muted)] font-normal">GPH</span></>
                         ) : 'UNKNOWN'}
                     </div>
                 </div>
                 <div className="flex-1 bg-[var(--bg-primary)]/50 border border-[var(--border-primary)] px-2 py-1.5">
-                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">
-                        {observed ? 'CO2 PRODUCED' : 'CO2 RATE'}
-                    </div>
+                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">CO2 RATE</div>
                     <div className="text-xs font-bold text-red-400">
-                        {observed ? (
-                            <>{observed.co2Kg.toLocaleString()} <span className="text-[11px] text-[var(--text-muted)] font-normal">KG</span></>
-                        ) : emissions ? (
+                        {emissions ? (
                             <>{emissions.co2_kg_per_hour.toLocaleString()} <span className="text-[11px] text-[var(--text-muted)] font-normal">KG/HR</span></>
                         ) : 'UNKNOWN'}
                     </div>
@@ -394,7 +273,6 @@ function EmissionsEstimateBlock({ flight }: { flight: any }) {
             {context && (
                 <div className="mt-1.5 text-[10px] text-[var(--text-muted)] leading-relaxed">
                     {context}
-                    {observed && emissions ? ` - estimated from ${emissions.fuel_gph} GPH model rate.` : ''}
                 </div>
             )}
         </div>

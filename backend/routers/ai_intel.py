@@ -379,14 +379,13 @@ async def api_refresh_layer_feed(request: Request, layer_id: str):
 # Agent Actions endpoint — frontend polls this for UI commands from the agent
 # ---------------------------------------------------------------------------
 
-@router.get("/api/ai/agent-actions")
+@router.get("/api/ai/agent-actions", dependencies=[Depends(require_local_operator)])
 @limiter.limit("120/minute")
 async def get_agent_actions(request: Request):
     """Frontend polls for pending agent display actions (destructive read).
 
-    No auth required — this only contains display directives (show image,
-    fly to location), not sensitive data. The agent authenticates when
-    pushing actions through the command channel.
+    Local operator access is required because polling destructively drains
+    the shared operator action queue.
     """
     actions = pop_agent_actions()
     return {"ok": True, "actions": actions}
@@ -1585,7 +1584,7 @@ async def agent_tool_manifest(request: Request):
 
     return {
         "ok": True,
-        "version": "0.9.75",
+        "version": "0.9.79",
         "access_tier": access_tier,
         "available_commands": available_commands,
         "transport": {
@@ -2221,7 +2220,7 @@ async def api_capabilities(request: Request):
     access_tier = str(get_settings().OPENCLAW_ACCESS_TIER or "restricted").strip().lower()
     return {
         "ok": True,
-        "version": "0.9.75",
+        "version": "0.9.79",
         "auth": {
             "method": "HMAC-SHA256",
             "headers": ["X-SB-Timestamp", "X-SB-Nonce", "X-SB-Signature"],

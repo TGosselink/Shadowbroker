@@ -361,6 +361,8 @@ async def _verify_openclaw_hmac(request: Request) -> bool:
     # Bind request body: digest the raw bytes so any body tampering
     # invalidates the signature.  Empty/absent bodies hash as sha256(b"").
     body_bytes = await request.body()
+    # Keep the cached body available for downstream handlers that call request.json().
+    request._body = body_bytes
     body_digest = _hashlib_mod.sha256(body_bytes).hexdigest()
 
     # Compute expected signature: HMAC-SHA256(secret, METHOD|path|ts|nonce|body_digest)

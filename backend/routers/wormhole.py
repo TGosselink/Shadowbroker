@@ -78,6 +78,21 @@ export_wormhole_dm_invite = getattr(
     "export_wormhole_dm_invite",
     _wormhole_identity_unavailable,
 )
+list_prekey_lookup_handle_records_for_ui = getattr(
+    _mesh_wormhole_identity,
+    "list_prekey_lookup_handle_records_for_ui",
+    _wormhole_identity_unavailable,
+)
+rename_prekey_lookup_handle = getattr(
+    _mesh_wormhole_identity,
+    "rename_prekey_lookup_handle",
+    _wormhole_identity_unavailable,
+)
+revoke_prekey_lookup_handle = getattr(
+    _mesh_wormhole_identity,
+    "revoke_prekey_lookup_handle",
+    _wormhole_identity_unavailable,
+)
 import_wormhole_dm_invite = getattr(
     _mesh_wormhole_identity,
     "import_wormhole_dm_invite",
@@ -311,6 +326,10 @@ class WormholeDmInviteImportRequest(BaseModel):
     alias: str = ""
 
 
+class WormholeDmInviteHandleUpdateRequest(BaseModel):
+    label: str = ""
+
+
 class WormholeDmSenderTokenRequest(BaseModel):
     recipient_id: str
     delivery_class: str
@@ -477,6 +496,7 @@ def decrypt_wormhole_dm_envelope(
     remote_alias: str | None = None,
     session_welcome: str | None = None,
 ) -> dict[str, Any]:
+    """Delegate to main.py, which owns current MLS/alias/legacy gating behavior."""
     import main as _m
 
     return _m.decrypt_wormhole_dm_envelope(
@@ -489,71 +509,13 @@ def decrypt_wormhole_dm_envelope(
         session_welcome=session_welcome,
     )
 
-    resolved_local, resolved_remote = _resolve_dm_aliases(
-        peer_id=peer_id,
-        local_alias=local_alias,
-        remote_alias=remote_alias,
-    )
-    normalized_format = str(payload_format or "dm1").strip().lower() or "dm1"
-    if normalized_format != "mls1" and is_dm_locked_to_mls(resolved_local, resolved_remote):
-        return {
-            "ok": False,
-            "detail": "DM session is locked to MLS format",
-            "required_format": "mls1",
-            "current_format": normalized_format,
-        }
-    if normalized_format == "mls1":
-        has_session = has_mls_dm_session(resolved_local, resolved_remote)
-        if not has_session.get("ok"):
-            return has_session
-        if not has_session.get("exists"):
-            ensured = ensure_mls_dm_session(resolved_local, resolved_remote, str(session_welcome or ""))
-            if not ensured.get("ok"):
-                return ensured
-        decrypted = decrypt_mls_dm(
-            resolved_local,
-            resolved_remote,
-            str(ciphertext or ""),
-            str(nonce or ""),
-        )
-        if not decrypted.get("ok"):
-            return decrypted
-        return {
-            "ok": True,
-            "peer_id": str(peer_id or "").strip(),
-            "local_alias": resolved_local,
-            "remote_alias": resolved_remote,
-            "plaintext": str(decrypted.get("plaintext", "") or ""),
-            "format": "mls1",
-        }
-
-    from services.wormhole_supervisor import get_transport_tier
-
-    current_tier = get_transport_tier()
-    if str(current_tier or "").startswith("private_"):
-        return {
-            "ok": False,
-            "detail": "MLS format required in private transport mode — legacy DM decrypt blocked",
-        }
-    logger.warning("legacy dm decrypt path used")
-    legacy = decrypt_wormhole_dm(peer_id=str(peer_id or ""), ciphertext=str(ciphertext or ""))
-    if not legacy.get("ok"):
-        return legacy
-    return {
-        "ok": True,
-        "peer_id": str(peer_id or "").strip(),
-        "local_alias": resolved_local,
-        "remote_alias": resolved_remote,
-        "plaintext": str(legacy.get("result", "") or ""),
-        "format": "dm1",
-    }
 
 
 
 # --- Routes ---
 
 @router.get("/api/settings/wormhole")
-@limiter.limit("30/minute")
+@limiter.limit("240/minute")
 async def api_get_wormhole_settings(request: Request):
     settings = await asyncio.to_thread(read_wormhole_settings)
     return _redact_wormhole_settings(settings, authenticated=_scoped_view_authenticated(request, "wormhole"))
@@ -582,248 +544,9 @@ async def api_set_wormhole_settings(request: Request, body: WormholeUpdate):
     return {**updated, "requires_restart": False, "runtime": state}
 
 
-class PrivacyProfileUpdate(BaseModel):
-    profile: str
-
-
-class WormholeSignRequest(BaseModel):
-    event_type: str
-    payload: dict
-    sequence: int | None = None
-    gate_id: str | None = None
-
-
-class WormholeSignRawRequest(BaseModel):
-    message: str
-
-
-class WormholeDmEncryptRequest(BaseModel):
-    peer_id: str
-    peer_dh_pub: str = ""
-    plaintext: str
-    local_alias: str | None = None
-    remote_alias: str | None = None
-    remote_prekey_bundle: dict[str, Any] | None = None
-
-
-class WormholeDmComposeRequest(BaseModel):
-    peer_id: str
-    peer_dh_pub: str = ""
-    plaintext: str
-    local_alias: str | None = None
-    remote_alias: str | None = None
-    remote_prekey_bundle: dict[str, Any] | None = None
-
-
-class WormholeDmDecryptRequest(BaseModel):
-    peer_id: str
-    ciphertext: str
-    format: str = "dm1"
-    nonce: str = ""
-    local_alias: str | None = None
-    remote_alias: str | None = None
-    session_welcome: str | None = None
-
-
-class WormholeDmResetRequest(BaseModel):
-    peer_id: str | None = None
-
-
-class WormholeDmBootstrapEncryptRequest(BaseModel):
-    peer_id: str
-    plaintext: str
-
-
-class WormholeDmBootstrapDecryptRequest(BaseModel):
-    sender_id: str = ""
-    ciphertext: str
-
-
-class WormholeDmSenderTokenRequest(BaseModel):
-    recipient_id: str
-    delivery_class: str
-    recipient_token: str = ""
-    count: int = 1
-
-
-class WormholeOpenSealRequest(BaseModel):
-    sender_seal: str
-    candidate_dh_pub: str = ""
-    recipient_id: str
-    expected_msg_id: str
-
-
-class WormholeBuildSealRequest(BaseModel):
-    recipient_id: str
-    recipient_dh_pub: str = ""
-    msg_id: str
-    timestamp: int
-
-
-class WormholeDeadDropTokenRequest(BaseModel):
-    peer_id: str
-    peer_dh_pub: str = ""
-    peer_ref: str = ""
-
-
-class WormholePairwiseAliasRequest(BaseModel):
-    peer_id: str
-    peer_dh_pub: str = ""
-
-
-class WormholePairwiseAliasRotateRequest(BaseModel):
-    peer_id: str
-    peer_dh_pub: str = ""
-    grace_ms: int = 45_000
-
-
-class WormholeDeadDropContactsRequest(BaseModel):
-    contacts: list[dict[str, Any]]
-    limit: int = 24
-
-
-class WormholeSasRequest(BaseModel):
-    peer_id: str
-    peer_dh_pub: str = ""
-    words: int = 8
-    peer_ref: str = ""
-
-
-class WormholeGateRequest(BaseModel):
-    gate_id: str
-    rotate: bool = False
-
-
-class WormholeGatePersonaCreateRequest(BaseModel):
-    gate_id: str
-    label: str = ""
-
-
-class WormholeGatePersonaActivateRequest(BaseModel):
-    gate_id: str
-    persona_id: str
-
-
-class WormholeGateKeyGrantRequest(BaseModel):
-    gate_id: str
-    recipient_node_id: str
-    recipient_dh_pub: str
-    recipient_scope: str = "member"
-
-
-class WormholeGateComposeRequest(BaseModel):
-    gate_id: str
-    plaintext: str
-    reply_to: str = ""
-    compat_plaintext: bool = False
-
-
-class WormholeGateDecryptRequest(BaseModel):
-    gate_id: str
-    epoch: int = 0
-    ciphertext: str
-    nonce: str = ""
-    sender_ref: str = ""
-    format: str = "mls1"
-    gate_envelope: str = ""
-    envelope_hash: str = ""
-    recovery_envelope: bool = False
-    compat_decrypt: bool = False
-    event_id: str = ""
-
-
-class WormholeGateDecryptBatchRequest(BaseModel):
-    messages: list[WormholeGateDecryptRequest]
-
-
-class WormholeGateRotateRequest(BaseModel):
-    gate_id: str
-    reason: str = "manual_rotate"
-
-def decrypt_wormhole_dm_envelope(
-    *,
-    peer_id: str,
-    ciphertext: str,
-    payload_format: str = "dm1",
-    nonce: str = "",
-    local_alias: str | None = None,
-    remote_alias: str | None = None,
-    session_welcome: str | None = None,
-) -> dict[str, Any]:
-    import main as _m
-
-    return _m.decrypt_wormhole_dm_envelope(
-        peer_id=peer_id,
-        ciphertext=ciphertext,
-        payload_format=payload_format,
-        nonce=nonce,
-        local_alias=local_alias,
-        remote_alias=remote_alias,
-        session_welcome=session_welcome,
-    )
-
-    resolved_local, resolved_remote = _resolve_dm_aliases(
-        peer_id=peer_id,
-        local_alias=local_alias,
-        remote_alias=remote_alias,
-    )
-    normalized_format = str(payload_format or "dm1").strip().lower() or "dm1"
-    if normalized_format != "mls1" and is_dm_locked_to_mls(resolved_local, resolved_remote):
-        return {
-            "ok": False,
-            "detail": "DM session is locked to MLS format",
-            "required_format": "mls1",
-            "current_format": normalized_format,
-        }
-    if normalized_format == "mls1":
-        has_session = has_mls_dm_session(resolved_local, resolved_remote)
-        if not has_session.get("ok"):
-            return has_session
-        if not has_session.get("exists"):
-            ensured = ensure_mls_dm_session(resolved_local, resolved_remote, str(session_welcome or ""))
-            if not ensured.get("ok"):
-                return ensured
-        decrypted = decrypt_mls_dm(
-            resolved_local,
-            resolved_remote,
-            str(ciphertext or ""),
-            str(nonce or ""),
-        )
-        if not decrypted.get("ok"):
-            return decrypted
-        return {
-            "ok": True,
-            "peer_id": str(peer_id or "").strip(),
-            "local_alias": resolved_local,
-            "remote_alias": resolved_remote,
-            "plaintext": str(decrypted.get("plaintext", "") or ""),
-            "format": "mls1",
-        }
-
-    from services.wormhole_supervisor import get_transport_tier
-
-    current_tier = get_transport_tier()
-    if str(current_tier or "").startswith("private_"):
-        return {
-            "ok": False,
-            "detail": "MLS format required in private transport mode — legacy DM decrypt blocked",
-        }
-    logger.warning("legacy dm decrypt path used")
-    legacy = decrypt_wormhole_dm(peer_id=str(peer_id or ""), ciphertext=str(ciphertext or ""))
-    if not legacy.get("ok"):
-        return legacy
-    return {
-        "ok": True,
-        "peer_id": str(peer_id or "").strip(),
-        "local_alias": resolved_local,
-        "remote_alias": resolved_remote,
-        "plaintext": str(legacy.get("result", "") or ""),
-        "format": "dm1",
-    }
-
 
 @router.get("/api/settings/privacy-profile")
-@limiter.limit("30/minute")
+@limiter.limit("240/minute")
 async def api_get_privacy_profile(request: Request):
     data = await asyncio.to_thread(read_wormhole_settings)
     return _redact_privacy_profile_settings(
@@ -833,7 +556,7 @@ async def api_get_privacy_profile(request: Request):
 
 
 @router.get("/api/settings/wormhole-status")
-@limiter.limit("30/minute")
+@limiter.limit("240/minute")
 async def api_get_wormhole_status(request: Request):
     state = await asyncio.to_thread(get_wormhole_state)
     transport_tier = _current_private_lane_tier(state)
@@ -907,7 +630,7 @@ async def api_wormhole_join(request: Request):
     )
 
     # Enable node participation so the sync/push workers connect to peers.
-    # This is the voluntary opt-in — the node only joins the network when
+    # This is the voluntary opt-in â€” the node only joins the network when
     # the user explicitly opens the Wormhole.
     from services.node_settings import write_node_settings
 
@@ -923,7 +646,7 @@ async def api_wormhole_join(request: Request):
     }
 
 
-@router.post("/api/wormhole/leave", dependencies=[Depends(require_local_operator)])
+@router.post("/api/wormhole/leave")
 @limiter.limit("10/minute")
 async def api_wormhole_leave(request: Request):
     updated = write_wormhole_settings(enabled=False)
@@ -941,7 +664,7 @@ async def api_wormhole_leave(request: Request):
 
 
 @router.get("/api/wormhole/identity", dependencies=[Depends(require_local_operator)])
-@limiter.limit("30/minute")
+@limiter.limit("240/minute")
 async def api_wormhole_identity(request: Request):
     try:
         bootstrap_wormhole_persona_state()
@@ -970,7 +693,7 @@ async def api_wormhole_identity_bootstrap(request: Request):
 
 
 @router.get("/api/wormhole/dm/identity", dependencies=[Depends(require_local_operator)])
-@limiter.limit("30/minute")
+@limiter.limit("240/minute")
 async def api_wormhole_dm_identity(request: Request):
     try:
         bootstrap_wormhole_persona_state()
@@ -982,11 +705,37 @@ async def api_wormhole_dm_identity(request: Request):
 
 @router.get("/api/wormhole/dm/invite", dependencies=[Depends(require_local_operator)])
 @limiter.limit("30/minute")
-async def api_wormhole_dm_invite(request: Request):
-    return export_wormhole_dm_invite()
+async def api_wormhole_dm_invite(
+    request: Request,
+    label: str = Query("", max_length=96),
+    expires_in_s: int = Query(0, ge=0, le=2_592_000),
+):
+    return export_wormhole_dm_invite(label=label, expires_in_s=expires_in_s)
 
 
-@router.post("/api/wormhole/dm/invite/import", dependencies=[Depends(require_admin)])
+@router.get("/api/wormhole/dm/invite/handles", dependencies=[Depends(require_local_operator)])
+@limiter.limit("240/minute")
+async def api_wormhole_dm_invite_handles(request: Request):
+    return list_prekey_lookup_handle_records_for_ui()
+
+
+@router.patch("/api/wormhole/dm/invite/handles/{handle}", dependencies=[Depends(require_local_operator)])
+@limiter.limit("60/minute")
+async def api_wormhole_dm_invite_handle_update(
+    request: Request,
+    handle: str,
+    body: WormholeDmInviteHandleUpdateRequest,
+):
+    return rename_prekey_lookup_handle(handle, str(body.label or "").strip())
+
+
+@router.delete("/api/wormhole/dm/invite/handles/{handle}", dependencies=[Depends(require_local_operator)])
+@limiter.limit("30/minute")
+async def api_wormhole_dm_invite_handle_revoke(request: Request, handle: str):
+    return revoke_prekey_lookup_handle(handle)
+
+
+@router.post("/api/wormhole/dm/invite/import", dependencies=[Depends(require_local_operator)])
 @limiter.limit("30/minute")
 async def api_wormhole_dm_invite_import(request: Request, body: WormholeDmInviteImportRequest):
     return import_wormhole_dm_invite(
@@ -1044,19 +793,19 @@ async def api_wormhole_gate_leave(request: Request, body: WormholeGateRequest):
     return leave_gate(str(body.gate_id or ""))
 
 
-@router.get("/api/wormhole/gate/{gate_id}/identity", dependencies=[Depends(require_local_operator)])
+@router.get("/api/wormhole/gate/{gate_id}/identity")
 @limiter.limit("30/minute")
 async def api_wormhole_gate_identity(request: Request, gate_id: str):
     return get_active_gate_identity(gate_id)
 
 
-@router.get("/api/wormhole/gate/{gate_id}/personas", dependencies=[Depends(require_local_operator)])
+@router.get("/api/wormhole/gate/{gate_id}/personas")
 @limiter.limit("30/minute")
 async def api_wormhole_gate_personas(request: Request, gate_id: str):
     return list_gate_personas(gate_id)
 
 
-@router.get("/api/wormhole/gate/{gate_id}/key", dependencies=[Depends(require_local_operator)])
+@router.get("/api/wormhole/gate/{gate_id}/key")
 @limiter.limit("30/minute")
 async def api_wormhole_gate_key_status(request: Request, gate_id: str):
     import main as _m
@@ -1205,7 +954,7 @@ async def api_wormhole_gate_message_sign_encrypted(
     return await _m.api_wormhole_gate_message_sign_encrypted(request, body)
 
 
-@router.post("/api/wormhole/gate/message/post-encrypted", dependencies=[Depends(require_local_operator)])
+@router.post("/api/wormhole/gate/message/post-encrypted")
 @limiter.limit("30/minute")
 async def api_wormhole_gate_message_post_encrypted(
     request: Request,
@@ -1547,7 +1296,7 @@ class PrivateDeliveryActionRequest(BaseModel):
 
 
 @router.get("/api/wormhole/status")
-@limiter.limit("30/minute")
+@limiter.limit("240/minute")
 async def api_wormhole_status(request: Request):
     import main as _m
 
@@ -1590,7 +1339,7 @@ async def api_wormhole_private_delivery_action(
 
 
 @router.get("/api/wormhole/health")
-@limiter.limit("30/minute")
+@limiter.limit("240/minute")
 async def api_wormhole_health(request: Request):
     state = get_wormhole_state()
     transport_tier = _current_private_lane_tier(state)
@@ -1611,7 +1360,7 @@ async def api_wormhole_health(request: Request):
     return _redact_wormhole_status(full_state, authenticated=ok)
 
 
-@router.post("/api/wormhole/connect", dependencies=[Depends(require_admin)])
+@router.post("/api/wormhole/connect", dependencies=[Depends(require_local_operator)])
 @limiter.limit("10/minute")
 async def api_wormhole_connect(request: Request):
     settings = read_wormhole_settings()

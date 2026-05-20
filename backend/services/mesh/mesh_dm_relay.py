@@ -1264,6 +1264,21 @@ class DMRelay:
                 )
             self._save()
 
+    def unregister_prekey_lookup_alias(self, alias: str) -> bool:
+        """Remove an invite-scoped lookup alias from the local relay."""
+        handle = str(alias or "").strip()
+        if not handle:
+            return False
+        removed = False
+        with self._lock:
+            self._refresh_from_shared_relay()
+            if handle in self._prekey_lookup_aliases:
+                del self._prekey_lookup_aliases[handle]
+                removed = True
+        if removed:
+            self._save()
+        return removed
+
     def consume_one_time_prekey(self, agent_id: str) -> dict[str, Any] | None:
         """Atomically claim the next published one-time prekey for a peer bundle."""
         claimed: dict[str, Any] | None = None

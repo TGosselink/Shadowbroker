@@ -1554,6 +1554,7 @@ function normalizeContactMap(input: Record<string, Contact> | Record<string, unk
 async function persistContactToWormhole(peerId: string, contact: Contact): Promise<void> {
   await controlPlaneJson('/api/wormhole/dm/contact', {
     method: 'PUT',
+    requireAdminSession: false,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       peer_id: peerId,
@@ -1565,6 +1566,7 @@ async function persistContactToWormhole(peerId: string, contact: Contact): Promi
 async function deleteContactFromWormhole(peerId: string): Promise<void> {
   await controlPlaneJson(`/api/wormhole/dm/contact/${encodeURIComponent(peerId)}`, {
     method: 'DELETE',
+    requireAdminSession: false,
   });
 }
 
@@ -1601,15 +1603,18 @@ export async function hydrateWormholeContacts(force: boolean = false): Promise<R
   if (!force && contactsHydration) {
     return contactsHydration;
   }
-  contactsHydration = controlPlaneJson<{ ok: boolean; contacts: Record<string, unknown> }>(
-    '/api/wormhole/dm/contacts',
-  )
-    .then((data) => {
-      contactCache = normalizeContactMap(data.contacts || {});
-      return contactCache;
-    })
-    .catch(() => contactCache);
+  contactsHydration = hydrateWormholeContactsFromNode().catch(() => contactCache);
   return contactsHydration;
+}
+
+export async function hydrateWormholeContactsFromNode(): Promise<Record<string, Contact>> {
+  const data = await controlPlaneJson<{ ok: boolean; contacts: Record<string, unknown> }>(
+    '/api/wormhole/dm/contacts',
+    { requireAdminSession: false },
+  );
+  contactCache = normalizeContactMap(data.contacts || {});
+  contactsHydration = Promise.resolve(contactCache);
+  return contactCache;
 }
 
 function getStoredContacts(): Record<string, Contact> {

@@ -243,6 +243,48 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _find_wormhole_server_pid() -> int:
+    if os.name == "nt":
+        return 0
+    proc_dir = Path("/proc")
+    if not proc_dir.exists():
+        return 0
+    current_pid = os.getpid()
+    script_name = WORMHOLE_SCRIPT.name
+    script_path = str(WORMHOLE_SCRIPT)
+    for entry in proc_dir.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == current_pid:
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
+        if script_path in cmdline or script_name in cmdline:
+            return pid
+    return 0
+
+
+def _terminate_pid(pid: int, *, timeout_s: float = 5.0) -> None:
+    if os.name == "nt" or pid <= 0:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception:
+        return
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline and _pid_alive(pid):
+        time.sleep(0.1)
+    if _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+
 def _probe_ready(timeout_s: float = 1.5) -> bool:
     try:
         with urlopen(f"http://{WORMHOLE_HOST}:{WORMHOLE_PORT}/api/health", timeout=timeout_s) as resp:
@@ -266,17 +308,32 @@ def _probe_json(path: str, timeout_s: float = 1.5) -> dict[str, Any] | None:
 def _current_runtime_state() -> dict[str, Any]:
     settings = read_wormhole_settings()
     status = read_wormhole_status()
+    configured = bool(settings.get("enabled"))
     running = False
+    ready = False
     pid = int(status.get("pid", 0) or 0)
-    if _PROCESS and _PROCESS.poll() is None:
+    if not configured:
+        # Disabled private transport must stay disabled even if a stale local
+        # wormhole process is still answering on the health port. Public
+        # MeshChat relies on this state to keep the MQTT and Wormhole lanes
+        # mutually exclusive.
+        pid = 0
+        ready = False
+    elif _PROCESS and _PROCESS.poll() is None:
         running = True
         pid = int(_PROCESS.pid or 0)
-    elif _pid_alive(pid):
-        running = True
-    elif _probe_ready(timeout_s=0.35):
-        running = True
-        pid = 0
-    ready = running and _probe_ready()
+    else:
+        if _pid_alive(pid):
+            running = True
+        else:
+            discovered_pid = _find_wormhole_server_pid()
+            if discovered_pid > 0:
+                running = True
+                pid = discovered_pid
+        if not running and _probe_ready(timeout_s=0.35):
+            running = True
+            pid = 0
+        ready = running and _probe_ready()
     if not running:
         pid = 0
     transport_active = status.get("transport_active", "") if ready else ""
@@ -319,13 +376,13 @@ def _current_runtime_state() -> dict[str, Any]:
     anonymous_mode = bool(settings.get("anonymous_mode"))
     anonymous_mode_ready = bool(
         anonymous_mode
-        and settings.get("enabled")
+        and configured
         and ready
         and effective_transport in {"tor", "tor_arti", "i2p", "mixnet"}
     )
     snapshot = {
         "installed": _installed(),
-        "configured": bool(settings.get("enabled")),
+        "configured": configured,
         "running": running,
         "ready": ready,
         "transport_configured": str(settings.get("transport", "direct") or "direct"),
@@ -395,6 +452,12 @@ def get_wormhole_state() -> dict[str, Any]:
 def connect_wormhole(*, reason: str = "connect") -> dict[str, Any]:
     with _LOCK:
         _invalidate_state_cache()
+        try:
+            from services.transport_lane_isolation import disable_public_mesh_lane
+
+            disable_public_mesh_lane(reason=f"wormhole_{reason}")
+        except Exception as exc:
+            logger.warning("Failed to enforce public/private lane isolation during %s: %s", reason, exc)
         settings = read_wormhole_settings()
         if not settings.get("enabled"):
             settings = settings.copy()
@@ -487,8 +550,8 @@ def connect_wormhole(*, reason: str = "connect") -> dict[str, Any]:
 def disconnect_wormhole(*, reason: str = "disconnect") -> dict[str, Any]:
     with _LOCK:
         _invalidate_state_cache()
-        current = _current_runtime_state()
-        pid = int(current.get("pid", 0) or 0)
+        status = read_wormhole_status()
+        pid = int(status.get("pid", 0) or 0)
         global _PROCESS
         if _PROCESS and _PROCESS.poll() is None:
             try:
@@ -499,14 +562,15 @@ def disconnect_wormhole(*, reason: str = "disconnect") -> dict[str, Any]:
                     _PROCESS.kill()
                 except Exception:
                     pass
-        elif os.name != "nt" and _pid_alive(pid):
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except Exception:
-                pass
+        if os.name != "nt":
+            _terminate_pid(pid)
+            discovered_pid = _find_wormhole_server_pid()
+            if discovered_pid > 0 and discovered_pid != pid:
+                _terminate_pid(discovered_pid)
         _PROCESS = None
         write_wormhole_status(
             reason=reason,
+            configured=False,
             running=False,
             ready=False,
             pid=0,

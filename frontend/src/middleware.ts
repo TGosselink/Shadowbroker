@@ -8,13 +8,16 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
-function buildCsp(_nonce: string): string {
+function buildCsp(nonce: string, strictScripts = false): string {
   const isDev = process.env.NODE_ENV !== 'production';
+  const scriptSrc = isDev
+    ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:"
+    : strictScripts
+      ? `script-src 'self' 'nonce-${nonce}' blob:`
+      : "script-src 'self' 'unsafe-inline' blob:";
   const directives = [
     "default-src 'self'",
-    isDev
-      ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:"
-      : "script-src 'self' 'unsafe-inline' blob:",
+    scriptSrc,
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "img-src 'self' data: blob: https:",
     isDev
@@ -35,10 +38,8 @@ function buildCsp(_nonce: string): string {
 export function middleware(request: NextRequest) {
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
 
-  // Forward a nonce for future fully-wired CSP support. Do not include it in
-  // script-src until every Next inline bootstrap script receives the nonce;
-  // otherwise production hydration can fail and leave the app on the static
-  // "prioritizing map feeds" shell.
+  // Forward a nonce for staged CSP support. Strict script-src is opt-in until
+  // every Next inline bootstrap script is verified with the nonce in production.
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set('x-nonce', nonce);
 
@@ -46,7 +47,11 @@ export function middleware(request: NextRequest) {
     request: { headers: requestHeaders },
   });
 
-  response.headers.set('Content-Security-Policy', buildCsp(nonce));
+  const strictCsp = process.env.SHADOWBROKER_STRICT_CSP === '1';
+  response.headers.set('Content-Security-Policy', buildCsp(nonce, strictCsp));
+  if (!strictCsp && process.env.NODE_ENV === 'production') {
+    response.headers.set('Content-Security-Policy-Report-Only', buildCsp(nonce, true));
+  }
 
   return response;
 }

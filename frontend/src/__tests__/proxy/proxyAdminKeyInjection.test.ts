@@ -7,6 +7,7 @@
  *   - /api/tools/*     (Sprint 1C addition)
  *   - /api/wormhole/*  (pre-existing, regression)
  *   - /api/settings/*  (pre-existing, regression)
+ *   - /api/layers, /api/ais/feed, /api/ai/agent-actions
  *
  * Also verifies that:
  *   - non-sensitive mesh paths (e.g. mesh/events) do NOT receive injected key
@@ -266,6 +267,77 @@ describe('proxy admin-key injection coverage', () => {
     });
     const res = await proxyGet(req, {
       params: Promise.resolve({ path: ['settings', 'node'] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(capturedHeaders(fetchMock).get('X-Admin-Key')).toBe(ADMIN_KEY);
+  });
+
+  it('POST /api/layers with valid session injects X-Admin-Key', async () => {
+    const cookie = await mintSession(ADMIN_KEY);
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: 'ok' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const req = new NextRequest('http://localhost/api/layers', {
+      method: 'POST',
+      body: JSON.stringify({ layers: { aircraft: true } }),
+      headers: { cookie, 'Content-Type': 'application/json' },
+    });
+    const res = await proxyPost(req, {
+      params: Promise.resolve({ path: ['layers'] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(capturedHeaders(fetchMock).get('X-Admin-Key')).toBe(ADMIN_KEY);
+  });
+
+  it('POST /api/ais/feed with valid session injects X-Admin-Key', async () => {
+    const cookie = await mintSession(ADMIN_KEY);
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: 'ok' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const req = new NextRequest('http://localhost/api/ais/feed', {
+      method: 'POST',
+      body: JSON.stringify({ msgs: [] }),
+      headers: { cookie, 'Content-Type': 'application/json' },
+    });
+    const res = await proxyPost(req, {
+      params: Promise.resolve({ path: ['ais', 'feed'] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(capturedHeaders(fetchMock).get('X-Admin-Key')).toBe(ADMIN_KEY);
+  });
+
+  it('GET /api/ai/agent-actions with valid session injects X-Admin-Key', async () => {
+    const cookie = await mintSession(ADMIN_KEY);
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, actions: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const req = new NextRequest('http://localhost/api/ai/agent-actions', {
+      method: 'GET',
+      headers: { cookie },
+    });
+    const res = await proxyGet(req, {
+      params: Promise.resolve({ path: ['ai', 'agent-actions'] }),
     });
 
     expect(res.status).toBe(200);

@@ -275,6 +275,11 @@ function hasKnownRouteName(value?: string | null): boolean {
 function flightHasKnownRoute(entity: ReturnType<typeof findSelectedEntity>, dynamicRoute: DynamicRoute | null): boolean {
   if (!entity) return false;
   if (dynamicRoute?.orig_loc && dynamicRoute?.dest_loc) return true;
+  return flightPayloadHasKnownRoute(entity);
+}
+
+function flightPayloadHasKnownRoute(entity: ReturnType<typeof findSelectedEntity>): boolean {
+  if (!entity) return false;
   if (!('origin_loc' in entity) && !('origin_name' in entity)) return false;
   const flight = entity as Flight;
   return Boolean(
@@ -653,7 +658,7 @@ const MaplibreViewer = ({
       };
     }
 
-    if (isFlight && flightHasKnownRoute(entity, dynamicRoute)) {
+    if (isFlight && flightPayloadHasKnownRoute(entity)) {
       setSelectedTrailPoints([]);
       return () => {
         cancelled = true;
@@ -1483,7 +1488,7 @@ const MaplibreViewer = ({
     void interpTick;
     const entity = findSelectedEntity(selectedEntity, data);
     if (!entity || selectedTrailPoints.length < 2) return null;
-    if (selectedEntity && FLIGHT_SELECTION_TYPES.has(selectedEntity.type) && flightHasKnownRoute(entity, dynamicRoute)) {
+    if (selectedEntity && FLIGHT_SELECTION_TYPES.has(selectedEntity.type) && flightPayloadHasKnownRoute(entity)) {
       return null;
     }
 

@@ -58,6 +58,8 @@ export interface InfonetNodeStatusSnapshot {
   total_events?: number;
   active_events?: number;
   known_nodes?: number;
+  author_nodes?: number;
+  registered_nodes?: number;
   chain_size_kb?: number;
   head_hash?: string;
   unsigned_events?: number;

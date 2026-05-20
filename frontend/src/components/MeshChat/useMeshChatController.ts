@@ -13,7 +13,7 @@ import {
   extractNativeGateResyncTarget,
 } from '@/lib/desktopControlContract';
 import type { DesktopControlAuditReport } from '@/lib/desktopControlContract';
-import { fetchPrivacyProfileSnapshot } from '@/mesh/controlPlaneStatusClient';
+import { fetchPrivacyProfileSnapshot, setInfonetNodeEnabled } from '@/mesh/controlPlaneStatusClient';
 import {
   getNodeIdentity,
   getStoredNodeDescriptor,
@@ -305,6 +305,42 @@ function createPublicMeshAddress(): string {
   return `!${fallback.toString(16).padStart(8, '0')}`;
 }
 
+function errorMessage(err: unknown, fallback: string = 'unknown error'): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err.trim()) return err.trim();
+  if (typeof err === 'object' && err !== null && 'message' in err) {
+    const message = String((err as { message?: unknown }).message || '').trim();
+    if (message) return message;
+  }
+  return fallback;
+}
+
+function describeMeshChatControlError(raw: string): string {
+  const message = String(raw || '').trim();
+  if (!message) return 'MeshChat could not update the local control plane.';
+  if (
+    message === 'control_plane_request_failed:530' ||
+    message === 'HTTP 530' ||
+    message.includes('control_plane_request_failed:530')
+  ) {
+    return 'The local control plane did not complete the lane switch. Check that the backend is running and reachable, then try Mesh again.';
+  }
+  if (
+    message === 'control_plane_request_failed:502' ||
+    message === 'HTTP 502' ||
+    /Backend unavailable/i.test(message)
+  ) {
+    return 'The frontend cannot reach the backend right now. Start or restart the backend, then try Mesh again.';
+  }
+  if (message === 'admin_session_required' || /local operator access only/i.test(message)) {
+    return 'This control action needs a local operator session. Open Settings or Node controls once so the app can authorize local changes, then try Mesh again.';
+  }
+  if (message.startsWith('{') || message.startsWith('<')) {
+    return 'MeshChat could not update the local control plane. Check the backend log for the upstream error.';
+  }
+  return message;
+}
+
 function describeGateCompatConsentRequired(): string {
   return 'Local gate runtime is unavailable for this room.';
 }
@@ -397,8 +433,9 @@ export function useMeshChatController({
   const [meshQuickStatus, setMeshQuickStatus] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [meshSessionActive, setMeshSessionActive] = useState(false);
   const [publicMeshAddress, setPublicMeshAddress] = useState('');
-  const [meshView, setMeshView] = useState<'channel' | 'inbox' | 'settings'>('channel');
+  const [meshView, setMeshView] = useState<'channel' | 'inbox' | 'settings' | 'message'>('channel');
   const [meshDirectTarget, setMeshDirectTarget] = useState('');
+  const [meshAddressDraft, setMeshAddressDraft] = useState('');
   const [meshMqttSettings, setMeshMqttSettings] = useState<MeshMqttSettings | null>(null);
   const [meshMqttForm, setMeshMqttForm] = useState<MeshMqttForm>({
     broker: 'mqtt.meshtastic.org',
@@ -427,14 +464,17 @@ export function useMeshChatController({
   const storedPublicMeshAddress = clientHydrated ? readStoredPublicMeshAddress() : '';
   const hasStoredPublicLaneIdentity = clientHydrated && Boolean(storedPublicMeshAddress);
   const publicIdentity = null;
-  const hasPublicLaneIdentity = meshSessionActive && Boolean(publicMeshAddress);
+  const activePublicMeshAddress = publicMeshAddress || storedPublicMeshAddress;
+  const hasPublicLaneIdentity = meshSessionActive && Boolean(activePublicMeshAddress);
   const hasId = Boolean(identity) && (hasSovereignty() || wormholeEnabled);
   const shouldShowIdentityWarning = activeTab !== 'meshtastic' && !hasId;
   const privateInfonetReady = wormholeEnabled && wormholeReadyState;
   const publicMeshBlockedByWormhole = wormholeEnabled || wormholeReadyState;
   const dmSendQueue = useRef<(() => Promise<void>)[]>([]);
+  const infonetAutoBootstrapRef = useRef(false);
   const meshMqttRuntime = meshMqttSettings?.runtime;
   const meshMqttEnabled = Boolean(meshMqttSettings?.enabled || meshMqttRuntime?.enabled);
+  const canUsePublicMeshInput = Boolean(activePublicMeshAddress) && meshMqttEnabled && !publicMeshBlockedByWormhole;
   const meshMqttRunning = Boolean(meshMqttRuntime?.running);
   const meshMqttConnected = Boolean(meshMqttRuntime?.connected);
   const meshMqttConnectionLabel = !meshMqttEnabled
@@ -503,8 +543,13 @@ export function useMeshChatController({
           body: JSON.stringify(body),
         });
         if (!res.ok) {
-          const detail = await res.text().catch(() => '');
-          throw new Error(detail || `HTTP ${res.status}`);
+          const data = await res.clone().json().catch(() => null) as
+            | { detail?: unknown; message?: unknown; error?: unknown }
+            | null;
+          const detail =
+            String(data?.detail || data?.message || data?.error || '').trim() ||
+            (await res.text().catch(() => '')).trim();
+          throw new Error(describeMeshChatControlError(detail || `HTTP ${res.status}`));
         }
         const data = (await res.json()) as MeshMqttSettings;
         applyMeshMqttSettings(data);
@@ -524,7 +569,7 @@ export function useMeshChatController({
         setMeshMqttStatusText(status);
         return { ok: true as const, text: status, data };
       } catch (err) {
-        const text = err instanceof Error ? err.message : 'MQTT settings update failed';
+        const text = describeMeshChatControlError(errorMessage(err, 'MQTT settings update failed'));
         setMeshMqttStatusText(text);
         return { ok: false as const, text };
       } finally {
@@ -546,16 +591,12 @@ export function useMeshChatController({
   const displayPublicMeshSender = useCallback(
     (sender: string) => {
       if (!sender) return '???';
-      if (
-        hasPublicLaneIdentity &&
-        publicMeshAddress &&
-        sender.toLowerCase() === publicMeshAddress.toLowerCase()
-      ) {
-        return publicMeshAddress.toUpperCase();
+      if (activePublicMeshAddress && sender.toLowerCase() === activePublicMeshAddress.toLowerCase()) {
+        return activePublicMeshAddress.toUpperCase();
       }
       return sender;
     },
-    [hasPublicLaneIdentity, publicMeshAddress],
+    [activePublicMeshAddress],
   );
 
   const openIdentityWizard = useCallback(
@@ -1221,6 +1262,7 @@ export function useMeshChatController({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const cursorMirrorRef = useRef<HTMLDivElement>(null);
   const cursorMarkerRef = useRef<HTMLSpanElement>(null);
+  const publicMeshPrivacyEnforcedRef = useRef(false);
 
   useEffect(() => {
     const el = messagesEndRef.current;
@@ -1329,15 +1371,21 @@ export function useMeshChatController({
     () => infoMessages.filter((m) => !m.node_id || !mutedUsers.has(m.node_id)),
     [infoMessages, mutedUsers],
   );
+  const isBroadcastMeshMessage = useCallback((m: MeshtasticMessage) => {
+    const target = String(m.to || 'broadcast').trim().toLowerCase();
+    return target === '' || target === 'broadcast' || target === '^all';
+  }, []);
   const filteredMeshMessages = useMemo(
-    () => meshMessages.filter((m) => !mutedUsers.has(m.from)),
-    [meshMessages, mutedUsers],
+    () => meshMessages.filter((m) => isBroadcastMeshMessage(m) && !mutedUsers.has(m.from)),
+    [isBroadcastMeshMessage, meshMessages, mutedUsers],
   );
   const meshInboxMessages = useMemo(() => {
-    if (!meshSessionActive || !publicMeshAddress) return [];
-    const target = publicMeshAddress.toLowerCase();
-    return filteredMeshMessages.filter((m) => String(m.to || '').toLowerCase() === target);
-  }, [filteredMeshMessages, meshSessionActive, publicMeshAddress]);
+    if (!activePublicMeshAddress) return [];
+    const target = activePublicMeshAddress.toLowerCase();
+    return meshMessages.filter(
+      (m) => !mutedUsers.has(m.from) && String(m.to || '').toLowerCase() === target,
+    );
+  }, [activePublicMeshAddress, meshMessages, mutedUsers]);
 
   useEffect(() => {
     if (!expanded || activeTab !== 'meshtastic') return;
@@ -1961,7 +2009,7 @@ export function useMeshChatController({
 
   // ─── Meshtastic Channel Discovery ──────────────────────────────────────
   useEffect(() => {
-    if (!expanded || activeTab !== 'meshtastic' || !meshSessionActive) return;
+    if (!expanded || activeTab !== 'meshtastic' || !canUsePublicMeshInput) return;
     let cancelled = false;
     const fetchChannels = async () => {
       try {
@@ -2020,12 +2068,12 @@ export function useMeshChatController({
       cancelled = true;
       clearInterval(iv);
     };
-  }, [expanded, activeTab, meshRegion, meshSessionActive]);
+  }, [expanded, activeTab, meshRegion, canUsePublicMeshInput]);
 
   // ─── Meshtastic Polling ──────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!expanded || activeTab !== 'meshtastic' || !meshSessionActive) return;
+    if (!expanded || activeTab !== 'meshtastic' || !canUsePublicMeshInput) return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -2034,6 +2082,7 @@ export function useMeshChatController({
           region: meshRegion,
           channel: meshChannel,
         });
+        if (meshView === 'inbox') params.set('include_direct', '1');
         const res = await fetch(`${API_BASE}/api/mesh/messages?${params}`);
         if (res.ok && !cancelled) {
           const data = await res.json();
@@ -2049,13 +2098,13 @@ export function useMeshChatController({
       cancelled = true;
       clearInterval(iv);
     };
-  }, [expanded, activeTab, meshRegion, meshChannel, meshView, meshSessionActive]);
+  }, [expanded, activeTab, meshRegion, meshChannel, meshView, canUsePublicMeshInput]);
 
   useEffect(() => {
-    if (meshSessionActive) return;
+    if (canUsePublicMeshInput) return;
     setMeshMessages([]);
     setMeshQuickStatus(null);
-  }, [meshSessionActive]);
+  }, [canUsePublicMeshInput]);
 
   // ─── DM Polling ──────────────────────────────────────────────────────────
 
@@ -2540,7 +2589,7 @@ export function useMeshChatController({
     if (!msg || busy) return;
     if (activeTab !== 'meshtastic' && !hasId) return;
 
-    const cooldownMs = activeTab === 'dms' ? 0 : 30_000;
+    const cooldownMs = activeTab === 'dms' ? 0 : activeTab === 'meshtastic' ? 6_000 : 30_000;
     const now = Date.now();
     const elapsed = now - lastSendTime;
     if (cooldownMs > 0 && elapsed < cooldownMs) {
@@ -2550,8 +2599,8 @@ export function useMeshChatController({
       return;
     }
 
-    if (anonymousPublicBlocked && (activeTab === 'infonet' || activeTab === 'meshtastic')) {
-      setSendError('hidden transport required for public posting');
+    if (anonymousPublicBlocked && activeTab === 'infonet') {
+      setSendError('hidden transport required for infonet posting');
       setTimeout(() => setSendError(''), 4000);
       return;
     }
@@ -2625,10 +2674,11 @@ export function useMeshChatController({
         ]);
         setGateReplyContext(null);
         } else if (activeTab === 'meshtastic') {
-          if (!meshSessionActive || !publicMeshAddress) {
+          const meshSenderAddress = activePublicMeshAddress;
+          if (!meshSenderAddress) {
             setInputValue(msg);
             setLastSendTime(0);
-            setSendError(meshSessionActive ? 'public mesh identity needed' : 'meshchat is off');
+            setSendError('public mesh identity needed');
             openIdentityWizard({
               type: 'err',
               text: hasStoredPublicLaneIdentity
@@ -2638,6 +2688,10 @@ export function useMeshChatController({
             setTimeout(() => setSendError(''), 4000);
             setBusy(false);
             return;
+          }
+          if (!meshSessionActive) {
+            setPublicMeshAddress(meshSenderAddress);
+            setMeshSessionActive(true);
           }
           if (!meshMqttEnabled) {
             setInputValue(msg);
@@ -2680,7 +2734,7 @@ export function useMeshChatController({
               priority: 'normal',
               ephemeral: false,
               transport_lock: 'meshtastic',
-              sender_id: publicMeshAddress,
+              sender_id: meshSenderAddress,
               mesh_region: meshRegion,
             }),
           });
@@ -2700,12 +2754,28 @@ export function useMeshChatController({
           return;
         }
         // Re-fetch — backend injects our msg into the bridge feed after publish
+        const directTarget = meshDestination !== 'broadcast'
+          ? meshDestination.startsWith('!')
+            ? meshDestination.toUpperCase()
+            : `!${meshDestination}`.toUpperCase()
+          : '';
+        const routeDetail = Array.isArray(sendData.results) && sendData.results[0]?.reason
+          ? String(sendData.results[0].reason)
+          : String(sendData.route_reason || 'MQTT broker accepted publish');
+        setMeshQuickStatus({
+          type: 'ok',
+          text: directTarget
+            ? `Direct message queued for ${directTarget}. ${routeDetail}`
+            : `Channel message published to ${meshRegion}/${meshChannel}. ${routeDetail}`,
+        });
+        window.setTimeout(() => setMeshQuickStatus(null), 6000);
         await new Promise((r) => setTimeout(r, 500));
         const params = new URLSearchParams({
           limit: '30',
           region: meshRegion,
           channel: meshChannel,
         });
+        if (directTarget) params.set('include_direct', '1');
         const mRes = await fetch(`${API_BASE}/api/mesh/messages?${params}`);
         if (mRes.ok) {
           const data = await mRes.json();
@@ -4138,7 +4208,7 @@ export function useMeshChatController({
     privateInfonetTransportReady,
   });
   const inputDisabled =
-    !hasId ||
+    (activeTab !== 'meshtastic' && !hasId) ||
     busy ||
     (activeTab === 'infonet' && !privateInfonetReady) ||
     (activeTab === 'infonet' && !selectedGate) ||
@@ -4148,7 +4218,7 @@ export function useMeshChatController({
       wormholeReadyState &&
       !selectedGateAccessReady) ||
     (activeTab === 'infonet' && anonymousPublicBlocked) ||
-    (activeTab === 'meshtastic' && (!hasPublicLaneIdentity || !meshMqttEnabled)) ||
+    (activeTab === 'meshtastic' && !canUsePublicMeshInput) ||
     (activeTab === 'dms' &&
       (dmView !== 'chat' ||
         !selectedContact ||
@@ -4192,6 +4262,17 @@ export function useMeshChatController({
     [inputDisabled],
   );
 
+  const disablePrivateNodeForPublicMesh = useCallback(async () => {
+    try {
+      await setInfonetNodeEnabled(false);
+    } catch (err) {
+      console.warn(
+        '[mesh] private node pre-disable failed before public Mesh activation; MQTT enable will retry lane isolation',
+        err,
+      );
+    }
+  }, []);
+
   const disableWormholeForPublicMesh = useCallback(async () => {
     const requireBackendLeave = wormholeEnabled || wormholeReadyState;
     try {
@@ -4207,7 +4288,28 @@ export function useMeshChatController({
     setWormholeRnsDirectReady(false);
     setWormholeRnsPeers({ active: 0, configured: 0 });
     setSecureModeCached(false);
-  }, [wormholeEnabled, wormholeReadyState]);
+    await disablePrivateNodeForPublicMesh();
+  }, [disablePrivateNodeForPublicMesh, wormholeEnabled, wormholeReadyState]);
+
+  useEffect(() => {
+    if (!meshSessionActive || !activePublicMeshAddress || !meshMqttEnabled) {
+      publicMeshPrivacyEnforcedRef.current = false;
+      return;
+    }
+    if (publicMeshPrivacyEnforcedRef.current) return;
+    publicMeshPrivacyEnforcedRef.current = true;
+    void disableWormholeForPublicMesh().catch((err) => {
+      publicMeshPrivacyEnforcedRef.current = false;
+      const message =
+        typeof err === 'object' && err !== null && 'message' in err
+          ? String((err as { message?: string }).message)
+          : 'unknown error';
+      setMeshQuickStatus({
+        type: 'err',
+        text: `Could not isolate public Mesh lane: ${message}`,
+      });
+    });
+  }, [activePublicMeshAddress, disableWormholeForPublicMesh, meshMqttEnabled, meshSessionActive]);
 
   const createPublicMeshIdentity = useCallback(
     async ({ closeWizardOnSuccess }: { closeWizardOnSuccess: boolean }) => {
@@ -4233,10 +4335,7 @@ export function useMeshChatController({
         }
         return { ok: true as const, text: successText };
       } catch (err) {
-        const message =
-          typeof err === 'object' && err !== null && 'message' in err
-            ? String((err as { message?: string }).message)
-            : 'unknown error';
+        const message = describeMeshChatControlError(errorMessage(err));
         const errorText =
           message === 'browser_identity_blocked_secure_mode'
             ? 'Mesh key creation is blocked while Wormhole secure mode is active. Turn Wormhole off first if you want a separate public mesh key.'
@@ -4286,15 +4385,12 @@ export function useMeshChatController({
       setMeshSessionActive(true);
       setMeshMessages([]);
       setSendError('');
-      const text = `MeshChat is on with saved address ${readyAddress}.`;
+      const text = `MeshChat is on. Address ${readyAddress}.`;
       setIdentityWizardStatus({ type: 'ok', text });
-      setMeshQuickStatus({ type: 'ok', text });
+      setMeshQuickStatus(null);
       return { ok: true as const, text };
     } catch (err) {
-      const message =
-        typeof err === 'object' && err !== null && 'message' in err
-          ? String((err as { message?: string }).message)
-          : 'unknown error';
+      const message = describeMeshChatControlError(errorMessage(err));
       const text = `Could not turn MeshChat on: ${message}`;
       setIdentityWizardStatus({ type: 'err', text });
       setMeshQuickStatus({ type: 'err', text });
@@ -4308,7 +4404,8 @@ export function useMeshChatController({
     const target = String(address || '').trim();
     if (!target) return;
     setMeshDirectTarget(target);
-    setMeshView('inbox');
+    setMeshAddressDraft(target);
+    setMeshView('channel');
     setSenderPopup(null);
     setTimeout(() => inputRef.current?.focus(), 0);
   }, []);
@@ -4319,7 +4416,7 @@ export function useMeshChatController({
       : await createPublicMeshIdentity({ closeWizardOnSuccess: false });
     const status = { type: result.ok ? 'ok' as const : 'err' as const, text: result.text };
     setIdentityWizardStatus(status);
-    setMeshQuickStatus(status);
+    setMeshQuickStatus(result.ok ? null : status);
     if (result.ok) {
       window.setTimeout(() => setIdentityWizardOpen(false), 900);
     }
@@ -4424,6 +4521,23 @@ export function useMeshChatController({
       setIdentityWizardBusy(false);
     }
   }, [wormholeDescriptor?.nodeId, wormholeEnabled, wormholeReadyState]);
+
+  useEffect(() => {
+    if (!expanded || activeTab !== 'infonet') {
+      infonetAutoBootstrapRef.current = false;
+      return;
+    }
+    if (privateInfonetReady) {
+      infonetAutoBootstrapRef.current = false;
+      return;
+    }
+    if (identityWizardBusy || infonetAutoBootstrapRef.current) return;
+    infonetAutoBootstrapRef.current = true;
+    void handleBootstrapPrivateIdentity().catch(() => {
+      infonetAutoBootstrapRef.current = false;
+    });
+  }, [activeTab, expanded, handleBootstrapPrivateIdentity, identityWizardBusy, privateInfonetReady]);
+
   return {
     // UI state
     expanded,
@@ -4447,10 +4561,13 @@ export function useMeshChatController({
     meshQuickStatus,
     meshSessionActive,
     publicMeshAddress,
+    activePublicMeshAddress,
     meshView,
     setMeshView,
     meshDirectTarget,
     setMeshDirectTarget,
+    meshAddressDraft,
+    setMeshAddressDraft,
     meshMqttSettings,
     meshMqttForm,
     setMeshMqttForm,
@@ -4467,6 +4584,7 @@ export function useMeshChatController({
     publicIdentity,
     hasStoredPublicLaneIdentity,
     hasPublicLaneIdentity,
+    canUsePublicMeshInput,
     hasId,
     shouldShowIdentityWarning,
     wormholeEnabled,

@@ -318,7 +318,7 @@ active_layers: dict[str, bool] = {
     "uap_sightings": True,
     "wastewater": True,
     "ai_intel": True,
-    "crowdthreat": True,
+    "crowdthreat": False,
     "sar": True,
 }
 

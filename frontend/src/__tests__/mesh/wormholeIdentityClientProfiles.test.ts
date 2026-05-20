@@ -1327,6 +1327,7 @@ describe('wormholeIdentityClient strict profile hints', () => {
       expect.objectContaining({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        requireAdminSession: false,
         body: JSON.stringify({
           invite: { event_type: 'dm_invite' },
           alias: 'field contact',
@@ -1356,7 +1357,9 @@ describe('wormholeIdentityClient strict profile hints', () => {
       }),
     );
 
-    expect(controlPlaneJson).toHaveBeenCalledWith('/api/wormhole/dm/root-health');
+    expect(controlPlaneJson).toHaveBeenCalledWith('/api/wormhole/dm/root-health', {
+      requireAdminSession: false,
+    });
   });
 
   it('prepares the interactive lane through the configured wormhole runtime and bootstraps identity state', async () => {
@@ -1378,6 +1381,7 @@ describe('wormholeIdentityClient strict profile hints', () => {
     const prepared = await mod.prepareWormholeInteractiveLane({ bootstrapIdentity: true });
 
     expect(connectWormhole).toHaveBeenCalledTimes(1);
+    expect(connectWormhole).toHaveBeenCalledWith({ requireAdminSession: false });
     expect(joinWormhole).not.toHaveBeenCalled();
     expect(prepared).toEqual(
       expect.objectContaining({

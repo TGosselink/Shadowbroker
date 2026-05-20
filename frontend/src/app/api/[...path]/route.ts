@@ -64,6 +64,9 @@ function isSensitiveProxyPath(pathSegments: string[]): boolean {
   if (joined === 'refresh') return true;
   if (joined === 'debug-latest') return true;
   if (joined === 'system/update') return true;
+  if (joined === 'layers') return true;
+  if (joined === 'ais/feed') return true;
+  if (joined === 'ai/agent-actions') return true;
   if (pathSegments[0] === 'settings') return true;
   if (joined === 'mesh/infonet/ingest') return true;
   if (joined === 'mesh/meshtastic/send') return true;

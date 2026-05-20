@@ -71,6 +71,38 @@ def _fresh_wormhole_state(tmp_path, monkeypatch):
     return relay, mesh_wormhole_identity, mesh_wormhole_contacts, mesh_wormhole_prekey
 
 
+def test_register_wormhole_dm_key_repairs_missing_local_dh_material(tmp_path, monkeypatch):
+    relay, identity_mod, _contacts_mod, _prekey_mod = _fresh_wormhole_state(tmp_path, monkeypatch)
+    identity = identity_mod.read_wormhole_identity()
+    original_node_id = identity["node_id"]
+    original_public_key = identity["public_key"]
+    original_private_key = identity["private_key"]
+
+    identity_mod.write_dm_identity(
+        {
+            **identity,
+            "dh_pub_key": "",
+            "dh_private_key": "",
+            "bundle_fingerprint": "",
+            "bundle_sequence": 0,
+            "bundle_registered_at": 0,
+        }
+    )
+
+    registered = identity_mod.register_wormhole_dm_key()
+    repaired = identity_mod.read_wormhole_identity()
+
+    assert registered["ok"] is True
+    assert registered["dh_pub_key"]
+    assert registered["dh_algo"] == "X25519"
+    assert repaired["dh_pub_key"] == registered["dh_pub_key"]
+    assert repaired["dh_private_key"]
+    assert repaired["node_id"] == original_node_id
+    assert repaired["public_key"] == original_public_key
+    assert repaired["private_key"] == original_private_key
+    assert relay.get_dh_key(original_node_id)["dh_pub_key"] == registered["dh_pub_key"]
+
+
 def _export_verified_invite(identity_mod):
     exported = identity_mod.export_wormhole_dm_invite()
     assert exported["ok"] is True
@@ -458,6 +490,30 @@ def test_imported_dm_invite_pins_contact_as_invite_pinned(tmp_path, monkeypatch)
     assert contact["invitePinnedDhPubKey"] == local_identity["dh_pub_key"]
     assert contact["invitePinnedPrekeyLookupHandle"] == exported["invite"]["payload"]["prekey_lookup_handle"]
     assert contacts_mod.list_wormhole_dm_contacts()[imported["peer_id"]]["trust_level"] == "invite_pinned"
+
+
+def test_imported_dm_invite_saves_pending_contact_when_prekey_not_visible(tmp_path, monkeypatch):
+    _relay, identity_mod, contacts_mod, prekey_mod = _fresh_wormhole_state(tmp_path, monkeypatch)
+    exported, verified = _export_verified_invite(identity_mod)
+    monkeypatch.setattr(
+        prekey_mod,
+        "fetch_dm_prekey_bundle",
+        lambda **_kw: {"ok": False, "detail": "Prekey bundle not found"},
+    )
+
+    imported = identity_mod.import_wormhole_dm_invite(exported["invite"], alias="alice")
+    contact = imported["contact"]
+
+    assert imported["ok"] is True
+    assert imported["pending_prekey"] is True
+    assert imported["peer_id"] == verified["peer_id"]
+    assert contact["alias"] == "alice"
+    assert contact["trust_level"] == "invite_pinned"
+    assert contact["invitePinnedPrekeyLookupHandle"] == exported["invite"]["payload"]["prekey_lookup_handle"]
+    assert contact["remotePrekeyLookupMode"] == "invite_lookup_handle"
+    assert contact["remotePrekeyFingerprint"] == verified["trust_fingerprint"]
+    assert contact["dhPubKey"] == ""
+    assert contacts_mod.list_wormhole_dm_contacts()[verified["peer_id"]]["trust_level"] == "invite_pinned"
 
 
 def test_imported_dm_invite_requires_root_attested_prekey_bundle(tmp_path, monkeypatch):

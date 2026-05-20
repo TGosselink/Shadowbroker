@@ -11,6 +11,7 @@ import os
 import random
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -147,6 +148,122 @@ def _fetch_dm_prekey_bundle_from_peer_lookup(lookup_token: str) -> dict[str, Any
             return payload
         if isinstance(payload, dict):
             last_detail = str(payload.get("detail", "") or last_detail)
+    return {"ok": False, "detail": last_detail or "Prekey bundle not found"}
+
+
+def _configured_public_lookup_peer_urls() -> list[str]:
+    try:
+        from services.config import get_settings
+        from services.mesh.mesh_router import active_sync_peer_urls, parse_configured_relay_peers
+
+        settings = get_settings()
+        candidates: list[str] = []
+        for raw in (
+            getattr(settings, "MESH_BOOTSTRAP_SEED_PEERS", ""),
+            getattr(settings, "MESH_DEFAULT_SYNC_PEERS", ""),
+        ):
+            candidates.extend(parse_configured_relay_peers(str(raw or "")))
+        candidates.extend(active_sync_peer_urls())
+    except Exception:
+        return []
+
+    seen: set[str] = set()
+    peers: list[str] = []
+    for candidate in candidates:
+        peer = str(candidate or "").strip().rstrip("/")
+        if not peer or peer in seen:
+            continue
+        seen.add(peer)
+        peers.append(peer)
+    return peers
+
+
+def _normalize_remote_lookup_bundle(payload: dict[str, Any]) -> dict[str, Any]:
+    data = dict(payload or {})
+    bundle = dict(data.get("bundle") or {})
+    public_key = str(data.get("public_key", "") or bundle.get("public_key", "") or "").strip()
+    if not public_key:
+        return {"ok": False, "detail": "Prekey bundle missing signing key"}
+    agent_id = str(data.get("agent_id", "") or "").strip() or derive_node_id(public_key)
+    if not agent_id:
+        return {"ok": False, "detail": "Prekey bundle public key binding mismatch"}
+    data["agent_id"] = agent_id
+    data["public_key"] = public_key
+    data["public_key_algo"] = str(data.get("public_key_algo", "") or bundle.get("public_key_algo", "Ed25519") or "Ed25519")
+    data["protocol_version"] = str(data.get("protocol_version", "") or bundle.get("protocol_version", PROTOCOL_VERSION) or PROTOCOL_VERSION)
+    data["bundle"] = bundle
+    ok, reason = _validate_bundle_record(data)
+    if not ok:
+        return {"ok": False, "detail": reason}
+    data["ok"] = True
+    data["lookup_mode"] = "invite_lookup_handle"
+    data["public_lookup"] = True
+    return data
+
+
+def _fetch_dm_prekey_bundle_from_public_lookup(lookup_token: str) -> dict[str, Any]:
+    """Fetch an invite-scoped prekey bundle from bootstrap/sync peers.
+
+    The token is high-entropy and invite-scoped. This path does not expose a
+    stable agent_id to the peer; if the ordinary peer response omits agent_id,
+    derive it from the signed identity public key and validate the bundle before
+    accepting it.
+    """
+    token = str(lookup_token or "").strip()
+    if not token:
+        return {"ok": False, "detail": "lookup token required"}
+    peers = _configured_public_lookup_peer_urls()
+    if not peers:
+        return {"ok": False, "detail": "peer prekey lookup unavailable"}
+    try:
+        from services.config import get_settings
+
+        timeout = max(1, _safe_int(getattr(get_settings(), "MESH_SYNC_TIMEOUT_S", 5) or 5, 5))
+    except Exception:
+        timeout = 5
+
+    encoded = urllib.parse.urlencode({"lookup_token": token})
+    last_detail = ""
+    for peer_url in peers:
+        normalized_peer_url = str(peer_url or "").strip().rstrip("/")
+        if not normalized_peer_url:
+            continue
+        # Generic UA: any peer-facing crypto request should not carry a
+        # fork-specific identifier — that turns prekey lookups into a
+        # software-fingerprinting beacon.
+        from services.network_utils import DEFAULT_USER_AGENT
+        request = urllib.request.Request(
+            f"{normalized_peer_url}/api/mesh/dm/prekey-bundle?{encoded}",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": DEFAULT_USER_AGENT,
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read(256 * 1024)
+            payload = json.loads(raw.decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+            logger.debug("public prekey lookup failed for %s: %s", normalized_peer_url, type(exc).__name__)
+            last_detail = "peer prekey lookup unavailable"
+            continue
+        if not isinstance(payload, dict):
+            last_detail = "invalid peer response"
+            continue
+        if payload.get("pending") or str(payload.get("status", "") or "") == "preparing_private_lane":
+            last_detail = "peer prekey lookup still preparing"
+            continue
+        if not payload.get("ok"):
+            last_detail = str(payload.get("detail", "") or last_detail or "Prekey bundle not found")
+            continue
+        if not isinstance(payload.get("bundle"), dict):
+            last_detail = "Prekey bundle not found"
+            continue
+        normalized = _normalize_remote_lookup_bundle(payload)
+        if normalized.get("ok"):
+            return normalized
+        last_detail = str(normalized.get("detail", "") or last_detail)
     return {"ok": False, "detail": last_detail or "Prekey bundle not found"}
 
 
@@ -926,6 +1043,11 @@ def fetch_dm_prekey_bundle(
             peer_found = _fetch_dm_prekey_bundle_from_peer_lookup(resolved_lookup)
             if peer_found.get("ok"):
                 return peer_found
+            public_found = _fetch_dm_prekey_bundle_from_public_lookup(resolved_lookup)
+            if public_found.get("ok"):
+                return public_found
+            if str(public_found.get("detail", "") or "").strip():
+                return {"ok": False, "detail": str(public_found.get("detail", "") or "Prekey bundle not found")}
             return {"ok": False, "detail": str(peer_found.get("detail", "") or "Prekey bundle not found")}
         else:
             return {"ok": False, "detail": "Prekey bundle not found"}

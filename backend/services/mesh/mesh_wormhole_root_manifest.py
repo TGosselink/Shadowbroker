@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from services.mesh.mesh_crypto import build_signature_payload, derive_node_id, verify_node_binding, verify_signature
 from services.mesh.mesh_protocol import PROTOCOL_VERSION
-from services.mesh.mesh_secure_storage import read_domain_json, write_domain_json
+from services.mesh.mesh_secure_storage import SecureStorageError, read_domain_json, write_domain_json
 from services.mesh.mesh_wormhole_identity import root_identity_fingerprint_for_material
 from services.mesh.mesh_wormhole_persona import (
     bootstrap_wormhole_persona_state,
@@ -51,6 +52,7 @@ DEFAULT_ROOT_WITNESS_THRESHOLD = 2
 DEFAULT_ROOT_WITNESS_MANAGEMENT_SCOPE = "local"
 DEFAULT_ROOT_WITNESS_INDEPENDENCE_GROUP = "local_system"
 DEFAULT_ROOT_EXTERNAL_WITNESS_MAX_AGE_S = 3600
+logger = logging.getLogger(__name__)
 
 
 def _safe_int(val: Any, default: int = 0) -> int:
@@ -461,12 +463,22 @@ def witness_policy_fingerprint(policy: dict[str, Any]) -> str:
 
 
 def read_root_distribution_state() -> dict[str, Any]:
-    raw = read_domain_json(
-        ROOT_DISTRIBUTION_DOMAIN,
-        ROOT_DISTRIBUTION_FILE,
-        _default_state,
-        base_dir=DATA_DIR,
-    )
+    try:
+        raw = read_domain_json(
+            ROOT_DISTRIBUTION_DOMAIN,
+            ROOT_DISTRIBUTION_FILE,
+            _default_state,
+            base_dir=DATA_DIR,
+        )
+    except SecureStorageError as exc:
+        detail = str(exc)
+        if "Failed to decrypt domain JSON" not in detail:
+            raise
+        logger.warning(
+            "Root distribution state could not decrypt; regenerating local witness distribution: %s",
+            detail,
+        )
+        raw = _default_state()
     state = {**_default_state(), **dict(raw or {})}
     state["witness_identity"] = {**_empty_witness_identity(), **dict(state.get("witness_identity") or {})}
     witness_identities, witness_changed = _normalize_witness_identities(

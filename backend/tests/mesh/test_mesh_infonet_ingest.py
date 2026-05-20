@@ -47,6 +47,11 @@ def test_infonet_ingest_accepts_valid_event(tmp_path, monkeypatch):
 
     assert result["accepted"] == 1
     assert inf.head_hash == evt.event_id
+    info = inf.get_info()
+    assert info["known_nodes"] == 1
+    assert info["author_nodes"] == 1
+    assert info["total_events"] == 1
+    assert info["event_types"]["message"] == 1
 
 
 def test_verify_node_binding_accepts_current_and_compat_ids_only(monkeypatch):
@@ -64,6 +69,8 @@ def test_verify_node_binding_accepts_current_and_compat_ids_only(monkeypatch):
         f"{current[len(mesh_crypto.NODE_ID_PREFIX):len(mesh_crypto.NODE_ID_PREFIX) + 8]}"
     )
 
+    monkeypatch.setenv("MESH_DEV_ALLOW_LEGACY_COMPAT", "true")
+    monkeypatch.setenv("MESH_BLOCK_LEGACY_NODE_ID_COMPAT", "false")
     monkeypatch.setenv("MESH_ALLOW_LEGACY_NODE_ID_COMPAT_UNTIL", "2099-01-01")
     from services.config import get_settings
 
@@ -98,7 +105,7 @@ def test_infonet_append_rejects_missing_signature_fields(tmp_path, monkeypatch):
         assert "signature" in str(exc).lower()
 
 
-def test_infonet_load_fails_closed_on_hash_mismatch(tmp_path, monkeypatch):
+def test_infonet_load_quarantines_and_resets_on_hash_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(mesh_hashchain, "DATA_DIR", tmp_path)
     monkeypatch.setattr(mesh_hashchain, "CHAIN_FILE", tmp_path / "infonet.json")
 
@@ -135,8 +142,12 @@ def test_infonet_load_fails_closed_on_hash_mismatch(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="Hash mismatch on event load"):
-        mesh_hashchain.Infonet()
+    inf = mesh_hashchain.Infonet()
+
+    assert inf.events == []
+    assert inf.head_hash == mesh_hashchain.GENESIS_HASH
+    assert not mesh_hashchain.CHAIN_FILE.exists()
+    assert list(tmp_path.glob("infonet.json.quarantine.*"))
 
 
 def test_validate_gate_message_payload_rejects_plaintext_shape():

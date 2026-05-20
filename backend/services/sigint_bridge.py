@@ -545,6 +545,198 @@ class MeshtasticBridge:
         self._message_dedupe[key] = now
         return False
 
+    @staticmethod
+    def _message_dedupe_key(message: dict) -> str:
+        sender = str(message.get("from") or "???").strip().lower()
+        recipient = str(message.get("to") or "broadcast").strip().lower()
+        text = str(message.get("text") or "").strip()
+        channel = str(message.get("channel") or "LongFast").strip().lower()
+        root = str(message.get("root") or message.get("region") or "").strip().lower()
+        if root == "us":
+            root = "us"
+        return f"{sender}:{recipient}:{root}:{channel}:{text}"
+
+    def append_text_message(self, message: dict, *, dedupe_window_s: float = 5.0) -> bool:
+        """Append a Meshtastic text message unless it is a near-immediate echo."""
+        if not str(message.get("text") or "").strip():
+            return False
+        now = time.time()
+        cutoff = now - max(1.0, dedupe_window_s)
+        next_message = dict(message)
+        next_message.setdefault("to", "broadcast")
+        next_message.setdefault("channel", "LongFast")
+        next_message.setdefault("timestamp", datetime.utcnow().isoformat() + "Z")
+        key = self._message_dedupe_key(next_message)
+        for existing in list(self.messages)[:40]:
+            if self._message_dedupe_key(existing) != key:
+                continue
+            try:
+                existing_ts_raw = existing.get("timestamp")
+                existing_ts = (
+                    datetime.fromisoformat(str(existing_ts_raw).replace("Z", "+00:00")).timestamp()
+                    if existing_ts_raw
+                    else now
+                )
+            except Exception:
+                existing_ts = now
+            if existing_ts >= cutoff:
+                if not existing.get("root") and next_message.get("root"):
+                    existing["root"] = next_message.get("root")
+                if not existing.get("region") and next_message.get("region"):
+                    existing["region"] = next_message.get("region")
+                return False
+        self.messages.appendleft(next_message)
+        return True
+
+    @staticmethod
+    def _coerce_node_ref(value) -> str:
+        """Normalize Meshtastic node identifiers into the public !xxxxxxxx form."""
+        if value is None:
+            return ""
+        if isinstance(value, int):
+            return f"!{value & 0xFFFFFFFF:08x}"
+        raw = str(value).strip()
+        if not raw:
+            return ""
+        if raw.startswith("!"):
+            return raw
+        lowered = raw.lower()
+        if lowered.startswith("0x"):
+            try:
+                return f"!{int(lowered, 16) & 0xFFFFFFFF:08x}"
+            except ValueError:
+                return raw
+        if raw.isdigit():
+            try:
+                return f"!{int(raw) & 0xFFFFFFFF:08x}"
+            except ValueError:
+                return raw
+        if len(raw) == 8 and all(ch in "0123456789abcdefABCDEF" for ch in raw):
+            return f"!{raw.lower()}"
+        return raw
+
+    @staticmethod
+    def _first_text_value(*values) -> str:
+        for value in values:
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    return MeshtasticBridge._repair_text_mojibake(text)
+        return ""
+
+    @staticmethod
+    def _repair_text_mojibake(text: str) -> str:
+        """Repair common UTF-8-as-Latin-1 mojibake from MQTT JSON bridges."""
+        if not text or not any(marker in text for marker in ("Ã", "Ð", "Ñ")):
+            return text
+        try:
+            repaired = text.encode("latin-1").decode("utf-8").strip()
+        except UnicodeError:
+            return text
+        if repaired and repaired != text:
+            return repaired
+        return text
+
+    @staticmethod
+    def _first_present(*values):
+        for value in values:
+            if value is not None and value != "":
+                return value
+        return None
+
+    def _extract_json_text_message(self, data: dict, topic: str) -> dict | None:
+        """Extract a public Meshtastic text event from decoded MQTT JSON.
+
+        Meshtastic JSON brokers are not perfectly uniform. Some packets expose
+        text at the top level, some under ``decoded`` or ``payload``. Keep this
+        permissive for receive, but only return messages with non-empty text.
+        """
+        if not isinstance(data, dict):
+            return None
+        topic_meta = parse_topic_metadata(topic)
+        packet = data.get("packet") if isinstance(data.get("packet"), dict) else {}
+        decoded = data.get("decoded") if isinstance(data.get("decoded"), dict) else {}
+        payload_obj = data.get("payload")
+        payload = payload_obj if isinstance(payload_obj, dict) else {}
+        decoded_payload_obj = decoded.get("payload") if decoded else None
+        decoded_payload = decoded_payload_obj if isinstance(decoded_payload_obj, dict) else {}
+
+        text = self._first_text_value(
+            data.get("text"),
+            data.get("message"),
+            data.get("msg"),
+            payload_obj if isinstance(payload_obj, str) else "",
+            payload.get("text"),
+            payload.get("message"),
+            payload.get("msg"),
+            payload.get("payload") if isinstance(payload.get("payload"), str) else "",
+            decoded.get("text"),
+            decoded.get("message"),
+            decoded.get("payload") if isinstance(decoded.get("payload"), str) else "",
+            decoded_payload.get("text"),
+            decoded_payload.get("message"),
+            decoded_payload.get("msg"),
+        )
+        if not text:
+            return None
+
+        sender = self._coerce_node_ref(
+            self._first_present(
+                data.get("from"),
+                data.get("fromId"),
+                data.get("from_id"),
+                data.get("sender"),
+                data.get("senderId"),
+                data.get("sender_id"),
+                packet.get("from"),
+                packet.get("fromId"),
+                packet.get("from_id"),
+                decoded.get("from"),
+            )
+        )
+        recipient = self._coerce_node_ref(
+            self._first_present(
+                data.get("to"),
+                data.get("toId"),
+                data.get("to_id"),
+                data.get("recipient"),
+                data.get("recipientId"),
+                data.get("recipient_id"),
+                packet.get("to"),
+                packet.get("toId"),
+                packet.get("to_id"),
+                decoded.get("to"),
+            )
+        )
+        if not recipient or recipient in {"!ffffffff", "broadcast"}:
+            recipient = "broadcast"
+
+        timestamp = datetime.utcnow().isoformat() + "Z"
+        rx_time = self._first_present(
+            data.get("rxTime"),
+            data.get("rx_time"),
+            data.get("timestamp"),
+            packet.get("rxTime"),
+            packet.get("timestamp"),
+        )
+        if isinstance(rx_time, (int, float)) and rx_time > 0:
+            try:
+                timestamp = datetime.fromtimestamp(float(rx_time), tz=timezone.utc).isoformat()
+            except (OSError, ValueError):
+                pass
+
+        return {
+            "from": sender or topic.split("/")[-1],
+            "to": recipient,
+            "text": text[:500],
+            "region": topic_meta["region"],
+            "root": topic_meta["root"],
+            "channel": topic_meta["channel"],
+            "timestamp": timestamp,
+        }
+
     def start(self):
         if self._thread and self._thread.is_alive():
             if not self._stop.is_set():
@@ -693,6 +885,9 @@ class MeshtasticBridge:
             if "/json/" in topic:
                 try:
                     data = json.loads(payload)
+                    text_message = self._extract_json_text_message(data, topic)
+                    if text_message:
+                        self.append_text_message(text_message, dedupe_window_s=30.0)
                     if self._rate_limited():
                         return
                     self._ingest_data(data, topic)
@@ -715,7 +910,7 @@ class MeshtasticBridge:
                         topic_meta["root"],
                     ):
                         return
-                    self.messages.appendleft(
+                    self.append_text_message(
                         {
                             "from": data.get("from", "???"),
                             "to": recipient,

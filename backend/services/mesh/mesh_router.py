@@ -520,7 +520,7 @@ class MeshtasticTransport:
 
             def _on_connect(client, userdata, flags, rc):
                 if rc == 0:
-                    info = client.publish(topic, payload, qos=0)
+                    info = client.publish(topic, payload, qos=1)
                     info.wait_for_publish(timeout=5)
                     published[0] = True
                     client.disconnect()
@@ -550,9 +550,9 @@ class MeshtasticTransport:
                 True,
                 self.NAME,
                 (
-                    f"Published direct to !{to_node:08x} via {region}/{channel}"
+                    f"Broker accepted direct publish to !{to_node:08x} via {region}/{channel}"
                     if direct_node is not None
-                    else f"Published to {region}/{channel} ({len(payload)}B protobuf)"
+                    else f"Broker accepted channel publish to {region}/{channel} ({len(payload)}B protobuf)"
                 ),
             )
         except Exception as e:
