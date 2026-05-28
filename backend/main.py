@@ -1,4 +1,4 @@
-﻿import os
+import os
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -8,18 +8,24 @@ import asyncio
 import base64
 import hmac
 import importlib
+import ipaddress
 import secrets
 import hashlib as _hashlib_mod
 from dataclasses import dataclass, field
 from typing import Any
 from json import JSONDecodeError
 
-APP_VERSION = "0.9.79"
+APP_VERSION = "0.9.81"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 _start_time = time.time()
 _MESH_ONLY = os.environ.get("MESH_ONLY", "").strip().lower() in ("1", "true", "yes")
+_HEADLESS_MESH_NODE_RUNTIME = os.environ.get("SHADOWBROKER_MESH_NODE_RUNTIME", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 _WARNED_LEGACY_DM_PUBKEY_LOOKUPS: set[str] = set()
 
 
@@ -220,6 +226,7 @@ from services.mesh.mesh_crypto import (
     _derive_peer_key,
     derive_node_id,
     normalize_peer_url,
+    resolve_peer_key_for_url,
     verify_node_binding,
     parse_public_key_algo,
 )
@@ -303,6 +310,7 @@ from auth import (
     _private_plane_access_denied_payload,
     _private_infonet_policy_snapshot,
     _private_plane_refusal_response,
+    _request_scope_path,
     _scoped_admin_tokens,
     _scoped_view_authenticated as _scoped_view_authenticated_auth,
     _security_headers,
@@ -1079,11 +1087,22 @@ def _public_mesh_log_size(entries: list[dict[str, Any]]) -> int:
     return sum(1 for item in entries if _public_mesh_log_entry(item) is not None)
 
 
-_WORMHOLE_PUBLIC_SETTINGS_FIELDS = {"enabled", "transport", "anonymous_mode"}
-_WORMHOLE_PUBLIC_PROFILE_FIELDS = {"profile", "wormhole_enabled"}
+# Issue #243 (tg12): the public redaction now exposes only the bare
+# "is Wormhole on?" boolean. Transport choice (tor/i2p/mixnet/direct),
+# anonymous-mode state, and the named privacy profile are all
+# operational posture and were leaking actionable recon to any
+# unauthenticated caller. They are now gated behind authenticated reads
+# (admin key or scoped-view token). Loopback Tauri shells and Docker
+# bridge frontend containers continue to see full status because the
+# Next.js catch-all proxy injects the configured ADMIN_KEY for
+# same-origin/non-browser callers (see PR #263), so legitimate operator
+# UX is unaffected.
+_WORMHOLE_PUBLIC_SETTINGS_FIELDS = {"enabled"}
+_WORMHOLE_PUBLIC_PROFILE_FIELDS = {"wormhole_enabled"}
 _PRIVATE_LANE_CONTROL_FIELDS = {"private_lane_tier", "private_lane_policy"}
 _PUBLIC_RNS_STATUS_FIELDS = {"enabled", "ready", "configured_peers", "active_peers"}
 _NODE_PUBLIC_EVENT_HOOK_REGISTERED = False
+_NODE_RUNTIME_THREADS_STARTED = False
 _INFONET_PRIVATE_TRANSPORT_LOCK = threading.Lock()
 
 
@@ -1173,6 +1192,49 @@ def _filter_infonet_sync_records(records: list[Any]) -> list[Any]:
     ]
 
 
+def _infonet_peer_url_allowed(peer_url: str) -> bool:
+    if not _infonet_private_transport_required():
+        return True
+    return _is_private_infonet_transport(peer_transport_kind(peer_url))
+
+
+def _filter_infonet_peer_urls(peer_urls: list[str]) -> list[str]:
+    if not _infonet_private_transport_required():
+        return peer_urls
+    return [peer_url for peer_url in peer_urls if _infonet_peer_url_allowed(peer_url)]
+
+
+def _infonet_peer_requests_proxies(normalized_peer_url: str) -> dict[str, str] | None:
+    """Return requests proxy settings for a sync/push peer, enforcing private policy."""
+    transport = peer_transport_kind(normalized_peer_url)
+    if _infonet_private_transport_required() and not _is_private_infonet_transport(transport):
+        raise RuntimeError(_infonet_private_transport_error())
+    if transport != "onion":
+        return None
+    if not bool(get_settings().MESH_ARTI_ENABLED):
+        raise RuntimeError("onion peer requests require Arti to be enabled")
+    from services.wormhole_supervisor import _check_arti_ready
+
+    if not _check_arti_ready():
+        raise RuntimeError("onion peer requests require a ready Arti transport")
+    socks_port = int(get_settings().MESH_ARTI_SOCKS_PORT or 9050)
+    proxy = f"socks5h://127.0.0.1:{socks_port}"
+    return {"http": proxy, "https": proxy}
+
+
+def _local_infonet_peer_url() -> str:
+    """Return this node's advertised peer URL for HMAC peer authentication."""
+    configured = normalize_peer_url(str(getattr(get_settings(), "MESH_PUBLIC_PEER_URL", "") or ""))
+    if configured:
+        return configured
+    try:
+        from services.tor_hidden_service import tor_service
+
+        return normalize_peer_url(str(tor_service.onion_address or ""))
+    except Exception:
+        return ""
+
+
 def _ensure_infonet_private_transport_ready(reason: str = "") -> bool:
     """Warm the local onion transport before private Infonet sync.
 
@@ -1246,6 +1308,13 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
     operator_peers = configured_relay_peer_urls()
     bootstrap_seed_peers = _configured_bootstrap_seed_peer_urls()
     skipped_clearnet_peers = 0
+    pruned_clearnet_peers = 0
+    if private_transport_required:
+        for key, record in list(store._records.items()):
+            if _is_private_infonet_transport(str(getattr(record, "transport", "") or "")):
+                continue
+            del store._records[key]
+            pruned_clearnet_peers += 1
     for peer_url in operator_peers:
         transport = peer_transport_kind(peer_url)
         if not transport:
@@ -1353,6 +1422,7 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
         "node_mode": mode,
         "private_transport_required": private_transport_required,
         "skipped_clearnet_peer_count": skipped_clearnet_peers,
+        "pruned_clearnet_peer_count": pruned_clearnet_peers,
         "manifest_loaded": manifest is not None,
         "manifest_signer_id": manifest.signer_id if manifest is not None else "",
         "manifest_valid_until": int(manifest.valid_until or 0) if manifest is not None else 0,
@@ -1373,6 +1443,28 @@ def _materialize_local_infonet_state() -> None:
     from services.mesh.mesh_hashchain import infonet
 
     infonet.ensure_materialized()
+    try:
+        _hydrate_gate_store_from_chain(list(infonet.events))
+        _hydrate_dm_relay_from_chain(list(infonet.events))
+    except Exception:
+        pass
+
+
+class PeerSyncHTTPError(RuntimeError):
+    def __init__(self, status_code: int, detail: str, *, retry_after_s: int = 0):
+        self.status_code = int(status_code or 0)
+        self.retry_after_s = int(retry_after_s or 0)
+        message = str(detail or f"HTTP {self.status_code}").strip()
+        if not message.upper().startswith("HTTP"):
+            message = f"HTTP {self.status_code}: {message}"
+        super().__init__(message)
+
+
+def _parse_retry_after_seconds(value: str) -> int:
+    try:
+        return max(0, int(float(str(value or "").strip())))
+    except Exception:
+        return 0
 
 
 def _peer_sync_response(peer_url: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -1406,13 +1498,37 @@ def _peer_sync_response(peer_url: str, body: dict[str, Any]) -> dict[str, Any]:
         proxy = f"socks5h://127.0.0.1:{socks_port}"
         kwargs["proxies"] = {"http": proxy, "https": proxy}
     response = _requests.post(f"{normalized}/api/mesh/infonet/sync", **kwargs)
+    # HTTP 429 must be surfaced as a typed exception carrying the
+    # Retry-After value, so finish_sync can honor it and stop hammering
+    # the upstream. Pre-fix this path just stringified the status into
+    # a ValueError, which finish_sync then ignored — keeping the
+    # upstream's rate-limit bucket full indefinitely.
+    if response.status_code == 429:
+        from services.mesh.mesh_infonet_sync_support import (
+            PeerSyncRateLimited,
+            parse_retry_after_header,
+        )
+
+        retry_after_s = parse_retry_after_header(
+            response.headers.get("Retry-After", "") or "",
+        )
+        try:
+            body_text = response.text[:200]
+        except Exception:
+            body_text = ""
+        raise PeerSyncRateLimited(
+            f"HTTP 429 from {normalized} (retry_after={retry_after_s}s): {body_text}",
+            retry_after_s=retry_after_s,
+            status=429,
+        )
     try:
         payload = response.json()
     except Exception as exc:
         raise ValueError(f"peer sync returned non-JSON response ({response.status_code})") from exc
     if response.status_code != 200:
         detail = str(payload.get("detail", "") or f"HTTP {response.status_code}").strip()
-        raise ValueError(detail or f"HTTP {response.status_code}")
+        retry_after_s = _parse_retry_after_seconds(response.headers.get("Retry-After", ""))
+        raise PeerSyncHTTPError(response.status_code, detail, retry_after_s=retry_after_s)
     if not isinstance(payload, dict):
         raise ValueError("peer sync returned malformed payload")
     return payload
@@ -1451,8 +1567,63 @@ def _hydrate_gate_store_from_chain(events: list[dict]) -> int:
     return count
 
 
-def _sync_from_peer(peer_url: str, *, page_limit: int = 100, max_rounds: int = 5) -> tuple[bool, str, bool]:
+def _hydrate_dm_relay_from_chain(events: list[dict]) -> int:
+    """Copy accepted dm_message chain events into the local encrypted DM relay."""
+    import hashlib
+
+    from services.mesh.mesh_dm_relay import dm_relay
     from services.mesh.mesh_hashchain import infonet
+
+    count = 0
+    for evt in events:
+        if evt.get("event_type") != "dm_message":
+            continue
+        event_id = str(evt.get("event_id", "") or "").strip()
+        if not event_id or event_id not in infonet.event_index:
+            continue
+        canonical = infonet.events[infonet.event_index[event_id]]
+        payload = canonical.get("payload") if isinstance(canonical.get("payload"), dict) else {}
+        sender_token_hash = hashlib.sha256(
+            f"hashchain-dm-sender|{event_id}|{canonical.get('node_id', '')}".encode("utf-8")
+        ).hexdigest()
+        try:
+            result = dm_relay.deposit(
+                sender_id=str(canonical.get("node_id", "") or ""),
+                raw_sender_id=str(canonical.get("node_id", "") or ""),
+                recipient_id=str(payload.get("recipient_id", "") or ""),
+                ciphertext=str(payload.get("ciphertext", "") or ""),
+                msg_id=str(payload.get("msg_id", "") or ""),
+                delivery_class=str(payload.get("delivery_class", "") or ""),
+                recipient_token=str(payload.get("recipient_token", "") or "") or None,
+                sender_seal=str(payload.get("sender_seal", "") or ""),
+                sender_token_hash=sender_token_hash,
+                payload_format=str(payload.get("format", "dm1") or "dm1"),
+                session_welcome=str(payload.get("session_welcome", "") or ""),
+            )
+            if result.get("ok"):
+                count += 1
+        except Exception:
+            pass
+    return count
+
+
+def _sync_from_peer(
+    peer_url: str,
+    *,
+    page_limit: int = 100,
+    max_rounds: int = 5,
+) -> tuple[bool, str, bool, int]:
+    """Sync the local Infonet chain against ``peer_url``.
+
+    Returns ``(ok, error, forked, retry_after_s)``. The fourth tuple
+    element is non-zero only when the peer responded with HTTP 429
+    and supplied a parseable ``Retry-After`` header — see the typed
+    ``PeerSyncRateLimited`` exception in mesh_infonet_sync_support.py.
+    Callers should pass that value to ``finish_sync(retry_after_s=...)``
+    so the next attempt actually waits.
+    """
+    from services.mesh.mesh_hashchain import infonet
+    from services.mesh.mesh_infonet_sync_support import PeerSyncRateLimited
 
     rounds = 0
     while rounds < max_rounds:
@@ -1461,7 +1632,11 @@ def _sync_from_peer(peer_url: str, *, page_limit: int = 100, max_rounds: int = 5
             "locator": infonet.get_locator(),
             "limit": page_limit,
         }
-        payload = _peer_sync_response(peer_url, body)
+        try:
+            payload = _peer_sync_response(peer_url, body)
+        except PeerSyncRateLimited as exc:
+            # Bubble up the retry-after so finish_sync can honor it.
+            return False, str(exc), False, exc.retry_after_s
         if bool(payload.get("forked")):
             # Auto-recover small local forks: if the local chain is tiny
             # (< 20 events) and the remote has a longer chain, reset local
@@ -1477,23 +1652,24 @@ def _sync_from_peer(peer_url: str, *, page_limit: int = 100, max_rounds: int = 5
                 )
                 infonet.reset_chain()
                 continue  # retry sync with clean genesis locator
-            return False, "fork detected", True
+            return False, "fork detected", True, 0
         events = payload.get("events", [])
         if not isinstance(events, list):
-            return False, "peer sync events must be a list", False
+            return False, "peer sync events must be a list", False, 0
         if not events:
-            return True, "", False
+            return True, "", False, 0
         result = infonet.ingest_events(events)
         _hydrate_gate_store_from_chain(events)
+        _hydrate_dm_relay_from_chain(events)
         rejected = list(result.get("rejected", []) or [])
         if rejected:
-            return False, f"sync ingest rejected {len(rejected)} event(s)", False
+            return False, f"sync ingest rejected {len(rejected)} event(s)", False, 0
         if int(result.get("accepted", 0) or 0) == 0 and int(result.get("duplicates", 0) or 0) >= len(events):
-            return True, "", False
+            return True, "", False, 0
         if len(events) < page_limit:
-            return True, "", False
+            return True, "", False, 0
         rounds += 1
-    return True, "", False
+    return True, "", False, 0
 
 
 def _run_public_sync_cycle() -> SyncWorkerState:
@@ -1547,6 +1723,8 @@ def _run_public_sync_cycle() -> SyncWorkerState:
 
     last_error = "sync failed"
     for record in peers:
+        retry_after_s = 0
+        http_status_code = 0
         started = begin_sync(
             current_state,
             peer_url=record.peer_url,
@@ -1556,11 +1734,23 @@ def _run_public_sync_cycle() -> SyncWorkerState:
         with _NODE_RUNTIME_LOCK:
             set_sync_state(started)
         try:
-            ok, error, forked = _sync_from_peer(record.peer_url)
+            ok, error, forked, retry_after_s = _sync_from_peer(record.peer_url)
+        except PeerSyncHTTPError as exc:
+            # _sync_from_peer catches PeerSyncRateLimited internally (4-tuple
+            # path for 429 with Retry-After). Other non-200 statuses surface
+            # here as PeerSyncHTTPError — pull retry_after_s + status off it
+            # so the cooldown calculation below can honor server hints even
+            # for non-429 throttling responses.
+            ok = False
+            error = str(exc)
+            forked = False
+            retry_after_s = int(exc.retry_after_s or 0)
+            http_status_code = int(exc.status_code or 0)
         except Exception as exc:
             ok = False
             error = str(exc or type(exc).__name__)
             forked = False
+            retry_after_s = 0
         if ok:
             store.mark_seen(record.peer_url, "sync", now=time.time())
             store.mark_sync_success(record.peer_url, now=time.time())
@@ -1586,6 +1776,10 @@ def _run_public_sync_cycle() -> SyncWorkerState:
                 getattr(settings, "MESH_BOOTSTRAP_SEED_FAILURE_COOLDOWN_S", cooldown_s)
                 or cooldown_s
             )
+        if http_status_code == 429:
+            failure_count = max(int(getattr(record, "failure_count", 0) or 0), current_state.consecutive_failures)
+            exponential_429_s = min(900, 60 * (2 ** min(failure_count, 4)))
+            cooldown_s = max(cooldown_s, retry_after_s, exponential_429_s)
         store.mark_failure(
             record.peer_url,
             "sync",
@@ -1596,7 +1790,7 @@ def _run_public_sync_cycle() -> SyncWorkerState:
         store.save()
         failure_backoff_s = int(settings.MESH_SYNC_FAILURE_BACKOFF_S or 60)
         if is_seed_peer:
-            failure_backoff_s = min(failure_backoff_s, max(1, cooldown_s))
+            failure_backoff_s = max(failure_backoff_s, max(1, cooldown_s))
         updated = finish_sync(
             started,
             ok=False,
@@ -1607,6 +1801,12 @@ def _run_public_sync_cycle() -> SyncWorkerState:
             now=time.time(),
             interval_s=int(get_settings().MESH_SYNC_INTERVAL_S or 300),
             failure_backoff_s=failure_backoff_s,
+            # 429 retry-storm fix: when the peer returned HTTP 429 with
+            # a Retry-After header, finish_sync uses max(exponential,
+            # retry_after) for next_sync_due_at — so we actually wait
+            # the time the upstream asked for instead of hammering
+            # every 60s and keeping its rate-limit bucket full forever.
+            retry_after_s=retry_after_s,
         )
         with _NODE_RUNTIME_LOCK:
             set_sync_state(updated)
@@ -1690,7 +1890,7 @@ def _propagate_public_event_to_peers(event_dict: dict[str, Any]) -> None:
 
     if not _participant_node_enabled():
         return
-    if not authenticated_push_peer_urls():
+    if not _filter_infonet_peer_urls(authenticated_push_peer_urls()):
         return
 
     envelope = MeshEnvelope(
@@ -1724,6 +1924,45 @@ def _schedule_public_event_propagation(event_dict: dict[str, Any]) -> None:
     ).start()
 
 
+def _infonet_node_runtime_requested() -> bool:
+    return (not _MESH_ONLY) or _HEADLESS_MESH_NODE_RUNTIME
+
+
+def _start_infonet_node_runtime(reason: str = "startup") -> None:
+    """Start sync/push/pull workers for participant nodes."""
+    global _NODE_PUBLIC_EVENT_HOOK_REGISTERED, _NODE_RUNTIME_THREADS_STARTED
+
+    if not _infonet_node_runtime_requested():
+        return
+    try:
+        from services.mesh.mesh_hashchain import register_public_event_append_hook
+
+        _materialize_local_infonet_state()
+        _refresh_node_peer_store()
+        if _node_runtime_supported():
+            if not _participant_node_enabled():
+                logger.info("Infonet participant auto-enabled for private seed sync")
+                _set_participant_node_enabled(True)
+            threading.Thread(
+                target=lambda: _ensure_infonet_private_transport_ready(reason),
+                daemon=True,
+                name="infonet-private-transport-warmup",
+            ).start()
+            _NODE_SYNC_STOP.clear()
+            if not _NODE_RUNTIME_THREADS_STARTED:
+                threading.Thread(target=_public_infonet_sync_loop, daemon=True).start()
+                threading.Thread(target=_http_peer_push_loop, daemon=True).start()
+                threading.Thread(target=_http_gate_push_loop, daemon=True).start()
+                threading.Thread(target=_http_gate_pull_loop, daemon=True).start()
+                _NODE_RUNTIME_THREADS_STARTED = True
+            _kick_public_sync_background(reason)
+        if not _NODE_PUBLIC_EVENT_HOOK_REGISTERED:
+            register_public_event_append_hook(_schedule_public_event_propagation)
+            _NODE_PUBLIC_EVENT_HOOK_REGISTERED = True
+    except Exception as e:
+        logger.warning(f"Node bootstrap runtime failed to initialize: {e}")
+
+
 # â”€â”€â”€ Background HTTP Peer Push Worker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Runs alongside the sync loop.  Every PUSH_INTERVAL seconds, batches new
 # Infonet events and sends them via HMAC-authenticated POST to push peers.
@@ -1731,6 +1970,7 @@ def _schedule_public_event_propagation(event_dict: dict[str, Any]) -> None:
 _PEER_PUSH_INTERVAL_S = 10
 _PEER_PUSH_BATCH_SIZE = 50
 _peer_push_last_index: dict[str, int] = {}  # peer_url â†’ last pushed event index
+_INFONET_SYNC_RATE_LIMIT = "600/minute"
 
 
 def _http_peer_push_loop() -> None:
@@ -1745,12 +1985,14 @@ def _http_peer_push_loop() -> None:
                 _NODE_SYNC_STOP.wait(_PEER_PUSH_INTERVAL_S)
                 continue
 
-            secret = str(get_settings().MESH_PEER_PUSH_SECRET or "").strip()
-            if not secret:
-                _NODE_SYNC_STOP.wait(_PEER_PUSH_INTERVAL_S)
-                continue
+            # Issue #256: resolve_peer_key_for_url() handles both the
+            # legacy global MESH_PEER_PUSH_SECRET path and the per-peer
+            # MESH_PEER_SECRETS map. The per-peer skip happens below
+            # ("if not peer_key: continue"), so we don't gate the whole
+            # loop on the global secret being set — an install that only
+            # configures per-peer secrets is now valid.
 
-            peers = authenticated_push_peer_urls()
+            peers = _filter_infonet_peer_urls(authenticated_push_peer_urls())
             if not peers:
                 _NODE_SYNC_STOP.wait(_PEER_PUSH_INTERVAL_S)
                 continue
@@ -1778,7 +2020,8 @@ def _http_peer_push_loop() -> None:
                         ensure_ascii=False,
                     ).encode("utf-8")
 
-                    peer_key = _derive_peer_key(secret, normalized)
+                    sender_url = _local_infonet_peer_url()
+                    peer_key = resolve_peer_key_for_url(sender_url)
                     if not peer_key:
                         continue
                     import hmac as _hmac_mod2
@@ -1786,14 +2029,21 @@ def _http_peer_push_loop() -> None:
                     hmac_hex = _hmac_mod2.new(peer_key, body_bytes, _hashlib_mod2.sha256).hexdigest()
 
                     timeout = int(get_settings().MESH_RELAY_PUSH_TIMEOUT_S or 10)
-                    resp = _requests.post(
-                        f"{normalized}/api/mesh/infonet/peer-push",
-                        data=body_bytes,
-                        headers={
+                    proxies = _infonet_peer_requests_proxies(normalized)
+                    request_kwargs: dict[str, Any] = {
+                        "data": body_bytes,
+                        "headers": {
                             "Content-Type": "application/json",
+                            "X-Peer-Url": sender_url,
                             "X-Peer-HMAC": hmac_hex,
                         },
-                        timeout=timeout,
+                        "timeout": timeout,
+                    }
+                    if proxies:
+                        request_kwargs["proxies"] = proxies
+                    resp = _requests.post(
+                        f"{normalized}/api/mesh/infonet/peer-push",
+                        **request_kwargs,
                     )
                     if resp.status_code == 200:
                         _peer_push_last_index[normalized] = last_idx + len(batch)
@@ -1831,12 +2081,9 @@ def _http_gate_pull_loop() -> None:
                 _NODE_SYNC_STOP.wait(_GATE_PULL_INTERVAL_S)
                 continue
 
-            secret = str(get_settings().MESH_PEER_PUSH_SECRET or "").strip()
-            if not secret:
-                _NODE_SYNC_STOP.wait(_GATE_PULL_INTERVAL_S)
-                continue
+            # Issue #256: per-peer key resolution; see _http_peer_push_loop.
 
-            peers = authenticated_push_peer_urls()
+            peers = _filter_infonet_peer_urls(authenticated_push_peer_urls())
             if not peers:
                 _NODE_SYNC_STOP.wait(_GATE_PULL_INTERVAL_S)
                 continue
@@ -1846,7 +2093,8 @@ def _http_gate_pull_loop() -> None:
                 if not normalized:
                     continue
 
-                peer_key = _derive_peer_key(secret, normalized)
+                sender_url = _local_infonet_peer_url()
+                peer_key = resolve_peer_key_for_url(sender_url)
                 if not peer_key:
                     continue
 
@@ -1866,14 +2114,21 @@ def _http_gate_pull_loop() -> None:
                     discovery_hmac = _hmac_pull.new(peer_key, discovery_body, _hashlib_pull.sha256).hexdigest()
 
                     timeout = int(get_settings().MESH_RELAY_PUSH_TIMEOUT_S or 10)
-                    resp = _requests.post(
-                        f"{normalized}/api/mesh/gate/peer-pull",
-                        data=discovery_body,
-                        headers={
+                    proxies = _infonet_peer_requests_proxies(normalized)
+                    discovery_kwargs: dict[str, Any] = {
+                        "data": discovery_body,
+                        "headers": {
                             "Content-Type": "application/json",
+                            "X-Peer-Url": sender_url,
                             "X-Peer-HMAC": discovery_hmac,
                         },
-                        timeout=timeout,
+                        "timeout": timeout,
+                    }
+                    if proxies:
+                        discovery_kwargs["proxies"] = proxies
+                    resp = _requests.post(
+                        f"{normalized}/api/mesh/gate/peer-pull",
+                        **discovery_kwargs,
                     )
                     if resp.status_code != 200:
                         continue
@@ -1903,14 +2158,20 @@ def _http_gate_pull_loop() -> None:
 
                         pull_hmac = _hmac_pull.new(peer_key, pull_body, _hashlib_pull.sha256).hexdigest()
 
-                        pull_resp = _requests.post(
-                            f"{normalized}/api/mesh/gate/peer-pull",
-                            data=pull_body,
-                            headers={
+                        pull_kwargs: dict[str, Any] = {
+                            "data": pull_body,
+                            "headers": {
                                 "Content-Type": "application/json",
+                                "X-Peer-Url": sender_url,
                                 "X-Peer-HMAC": pull_hmac,
                             },
-                            timeout=timeout,
+                            "timeout": timeout,
+                        }
+                        if proxies:
+                            pull_kwargs["proxies"] = proxies
+                        pull_resp = _requests.post(
+                            f"{normalized}/api/mesh/gate/peer-pull",
+                            **pull_kwargs,
                         )
                         if pull_resp.status_code != 200:
                             continue
@@ -1959,12 +2220,9 @@ def _http_gate_push_loop() -> None:
                 _NODE_SYNC_STOP.wait(_PEER_PUSH_INTERVAL_S)
                 continue
 
-            secret = str(get_settings().MESH_PEER_PUSH_SECRET or "").strip()
-            if not secret:
-                _NODE_SYNC_STOP.wait(_PEER_PUSH_INTERVAL_S)
-                continue
+            # Issue #256: per-peer key resolution; see _http_peer_push_loop.
 
-            peers = authenticated_push_peer_urls()
+            peers = _filter_infonet_peer_urls(authenticated_push_peer_urls())
             if not peers:
                 _NODE_SYNC_STOP.wait(_PEER_PUSH_INTERVAL_S)
                 continue
@@ -1977,7 +2235,8 @@ def _http_gate_push_loop() -> None:
                 if not normalized:
                     continue
 
-                peer_key = _derive_peer_key(secret, normalized)
+                sender_url = _local_infonet_peer_url()
+                peer_key = resolve_peer_key_for_url(sender_url)
                 if not peer_key:
                     continue
 
@@ -2008,14 +2267,21 @@ def _http_gate_push_loop() -> None:
                         hmac_hex = _hmac_mod3.new(peer_key, body_bytes, _hashlib_mod3.sha256).hexdigest()
 
                         timeout = int(get_settings().MESH_RELAY_PUSH_TIMEOUT_S or 10)
-                        resp = _requests.post(
-                            f"{normalized}/api/mesh/gate/peer-push",
-                            data=body_bytes,
-                            headers={
+                        proxies = _infonet_peer_requests_proxies(normalized)
+                        request_kwargs: dict[str, Any] = {
+                            "data": body_bytes,
+                            "headers": {
                                 "Content-Type": "application/json",
+                                "X-Peer-Url": sender_url,
                                 "X-Peer-HMAC": hmac_hex,
                             },
-                            timeout=timeout,
+                            "timeout": timeout,
+                        }
+                        if proxies:
+                            request_kwargs["proxies"] = proxies
+                        resp = _requests.post(
+                            f"{normalized}/api/mesh/gate/peer-push",
+                            **request_kwargs,
                         )
                         if resp.status_code == 200:
                             peer_counts[gate_id] = last + len(batch)
@@ -2357,32 +2623,8 @@ async def lifespan(app: FastAPI):
             daemon=True,
             name="wormhole-startup-sync",
         ).start()
-        try:
-            from services.mesh.mesh_hashchain import register_public_event_append_hook
 
-            _materialize_local_infonet_state()
-            _refresh_node_peer_store()
-            if _node_runtime_supported():
-                if not _participant_node_enabled():
-                    logger.info("Infonet participant auto-enabled for private seed sync")
-                    _set_participant_node_enabled(True)
-                threading.Thread(
-                    target=lambda: _ensure_infonet_private_transport_ready("startup"),
-                    daemon=True,
-                    name="infonet-private-transport-warmup",
-                ).start()
-                _NODE_SYNC_STOP.clear()
-                threading.Thread(target=_public_infonet_sync_loop, daemon=True).start()
-                _kick_public_sync_background("startup")
-                threading.Thread(target=_http_peer_push_loop, daemon=True).start()
-                threading.Thread(target=_http_gate_push_loop, daemon=True).start()
-                threading.Thread(target=_http_gate_pull_loop, daemon=True).start()
-            global _NODE_PUBLIC_EVENT_HOOK_REGISTERED
-            if not _NODE_PUBLIC_EVENT_HOOK_REGISTERED:
-                register_public_event_append_hook(_schedule_public_event_propagation)
-                _NODE_PUBLIC_EVENT_HOOK_REGISTERED = True
-        except Exception as e:
-            logger.warning(f"Node bootstrap runtime failed to initialize: {e}")
+    _start_infonet_node_runtime("startup")
 
     if not _MESH_ONLY:
         # Prime the static route/airport database from vrs-standing-data.adsb.lol
@@ -2487,7 +2729,7 @@ async def json_decode_error_handler(_request: Request, _exc: JSONDecodeError):
 
 @app.exception_handler(StarletteHTTPException)
 async def private_plane_http_exception_handler(request: Request, exc: StarletteHTTPException):
-    if exc.status_code == 403 and _is_private_plane_access_path(request.url.path, request.method):
+    if exc.status_code == 403 and _is_private_plane_access_path(_request_scope_path(request), request.method):
         return await _private_plane_refusal_response(
             request,
             status_code=403,
@@ -2521,7 +2763,7 @@ async def mesh_security_headers(request: Request, call_next):
 @app.middleware("http")
 async def mesh_no_store_headers(request: Request, call_next):
     response = await call_next(request)
-    if request.url.path.startswith("/api/mesh/"):
+    if _request_scope_path(request).startswith("/api/mesh/"):
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
     return response
@@ -2619,6 +2861,83 @@ def _redact_vote_gate(event: dict) -> dict:
 def _redact_public_event(event: dict) -> dict:
     """Apply all public-response redactions for public chain endpoints."""
     return _redact_vote_gate(_redact_key_rotate_payload(_redact_gate_metadata(event)))
+
+
+def _is_loopback_host(host: str) -> bool:
+    value = str(host or "").strip().lower()
+    if not value:
+        return False
+    if value.startswith("[") and "]" in value:
+        value = value[1 : value.index("]")]
+    if ":" in value and value.count(":") == 1:
+        value = value.rsplit(":", 1)[0]
+    if value in {"localhost", "ip6-localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_onion_host(host: str) -> bool:
+    value = str(host or "").strip().lower()
+    if not value:
+        return False
+    if ":" in value and value.count(":") == 1:
+        value = value.rsplit(":", 1)[0]
+    return value.endswith(".onion")
+
+
+def _forwarded_for_hosts(request) -> list[str]:
+    headers = getattr(request, "headers", {}) or {}
+    hosts: list[str] = []
+    x_forwarded_for = str(headers.get("x-forwarded-for", "") or "")
+    hosts.extend(part.strip() for part in x_forwarded_for.split(",") if part.strip())
+    forwarded = str(headers.get("forwarded", "") or "")
+    for section in forwarded.split(","):
+        for item in section.split(";"):
+            key, sep, value = item.strip().partition("=")
+            if sep and key.strip().lower() == "for":
+                hosts.append(value.strip().strip('"').strip("[]"))
+    return hosts
+
+
+def _request_appears_private_infonet_transport(request) -> bool:
+    """Return whether a sync request is safe to carry private ledger events.
+
+    This is intentionally fail-closed for the private event surface only. A
+    questionable request still gets public events; gate/DM ciphertext simply
+    stays out of the response.
+    """
+    if not _infonet_private_transport_required() or request is None:
+        return False
+
+    client = getattr(request, "client", None)
+    client_host = str(getattr(client, "host", "") or "")
+    if not (_is_loopback_host(client_host) or _is_onion_host(client_host)):
+        return False
+
+    forwarded_hosts = _forwarded_for_hosts(request)
+    if forwarded_hosts and any(not (_is_loopback_host(host) or _is_onion_host(host)) for host in forwarded_hosts):
+        return False
+
+    return True
+
+
+def _infonet_sync_response_events(events: list[dict], request=None) -> list[dict]:
+    """Build the sync event surface for the current transport policy."""
+    include_private = _request_appears_private_infonet_transport(request)
+    response: list[dict] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("event_type", "") or "")
+        if event_type in {"gate_message", "dm_message"}:
+            if include_private:
+                response.append(dict(event))
+            continue
+        response.append(_redact_public_event(event))
+    return response
 
 
 def _trusted_gate_reply_to(event: dict) -> str:
@@ -3138,7 +3457,7 @@ def _refresh_lookup_handle_rotation_background(*, reason: str) -> dict[str, Any]
 
 @app.middleware("http")
 async def enforce_high_privacy_mesh(request: Request, call_next):
-    path = request.url.path
+    path = _request_scope_path(request)
     private_mesh_path = path.startswith("/api/mesh") and not _is_public_meshtastic_lane_path(
         path,
         request.method,
@@ -3298,7 +3617,7 @@ async def enforce_high_privacy_mesh(request: Request, call_next):
 @app.middleware("http")
 async def apply_no_store_to_sensitive_paths(request: Request, call_next):
     response = await call_next(request)
-    if _is_sensitive_no_store_path(request.url.path):
+    if _is_sensitive_no_store_path(_request_scope_path(request)):
         for key, value in _NO_STORE_HEADERS.items():
             response.headers[key] = value
     return response
@@ -5205,32 +5524,15 @@ def _submit_gate_message_envelope(request: Request, gate_id: str, body: dict[str
     if not cooldown_ok:
         return {"ok": False, "detail": cooldown_reason}
 
-    # Advance sequence counter (replay protection) without appending to
-    # the public infonet chain â€” gate messages are private.
-    try:
-        from services.mesh.mesh_hashchain import infonet, gate_store
-
-        seq_ok, seq_reason = _validate_private_signed_sequence(
-            infonet,
-            sender_id,
-            sequence,
-            domain="gate_message",
-        )
-        if not seq_ok:
-            return {"ok": False, "detail": seq_reason}
-    except ValueError as exc:
-        return {"ok": False, "detail": str(exc)}
-    except Exception:
-        logger.exception("Failed to advance sequence for gate message")
-        return {"ok": False, "detail": "Failed to record gate message"}
-
     gate_manager.record_message(gate_id)
     _record_gate_post_cooldown(sender_id, gate_id)
     logger.info("Encrypted gate message accepted on obfuscated gate plane")
 
-    # Build gate event and store in gate_store (private â€” not on public chain).
+    # Build and commit the encrypted gate event to the private Infonet ledger.
+    # The main hashchain is the durable propagation surface; gate_store is the
+    # local materialized view used by the existing decrypt/UI path.
     try:
-        from services.mesh.mesh_hashchain import _private_gate_event_id
+        from services.mesh.mesh_hashchain import infonet
         import time as _time
 
         store_payload = dict(gate_payload)
@@ -5252,19 +5554,24 @@ def _submit_gate_message_envelope(request: Request, gate_id: str, body: dict[str
             "public_key_algo": public_key_algo,
             "protocol_version": protocol_version or PROTOCOL_VERSION,
         }
-        gate_event["event_id"] = _private_gate_event_id(gate_id, sender_id, sequence, gate_event)
+        gate_event = infonet.append_private_gate_message(
+            node_id=sender_id,
+            payload=store_payload,
+            signature=signature,
+            sequence=sequence,
+            public_key=public_key,
+            public_key_algo=public_key_algo,
+            protocol_version=protocol_version or PROTOCOL_VERSION,
+            timestamp=float(gate_event.get("timestamp", 0) or 0),
+        )
+    except ValueError as exc:
+        return {"ok": False, "detail": str(exc)}
     except Exception:
-        logger.exception("Failed to prepare private gate message for queued release")
+        logger.exception("Failed to append gate message to private Infonet ledger")
         return {"ok": False, "detail": "Failed to record gate message"}
 
-    # Append to the local gate_store immediately. The gate_store is a
-    # per-node persistent ciphertext chain; writing to it is a local
-    # operation with no network dependency. Previously this happened only
-    # inside the release worker's attempt_private_release path, which
-    # meant messages sat in the outbox — invisible to the author and the
-    # gate UI — until the transport tier reached the release floor.
-    # Decoupling local visibility from network fan-out: append locally now,
-    # queue the release for network propagation when the lane is ready.
+    # Append to the local gate_store immediately so the author sees the same
+    # materialized gate view that peers will hydrate after private sync.
     try:
         from services.mesh.mesh_hashchain import gate_store
 
@@ -5391,7 +5698,7 @@ async def infonet_locator(request: Request, limit: int = Query(32, ge=4, le=128)
 
 
 @app.post("/api/mesh/infonet/sync")
-@limiter.limit("30/minute")
+@limiter.limit(_INFONET_SYNC_RATE_LIMIT)
 @mesh_write_exempt(MeshWriteExemption.PEER_GOSSIP)
 async def infonet_sync_post(
     request: Request,
@@ -5444,8 +5751,7 @@ async def infonet_sync_post(
     elif matched_hash == GENESIS_HASH and len(locator) > 1:
         forked = True
 
-    # Filter out legacy gate_message events â€” not part of the public sync surface.
-    events = [_redact_public_event(e) for e in events if e.get("event_type") != "gate_message"]
+    events = _infonet_sync_response_events(events, request=request)
 
     response = {
         "events": events,
@@ -5508,7 +5814,7 @@ async def mesh_rns_status(request: Request):
 
 
 @app.get("/api/mesh/infonet/sync")
-@limiter.limit("30/minute")
+@limiter.limit(_INFONET_SYNC_RATE_LIMIT)
 async def infonet_sync(
     request: Request,
     after_hash: str = "",
@@ -5546,8 +5852,7 @@ async def infonet_sync(
         )
     base = after_hash or GENESIS_HASH
     events = infonet.get_events_after(base, limit=limit)
-    # Filter out legacy gate_message events â€” not part of the public sync surface.
-    events = [_redact_public_event(e) for e in events if e.get("event_type") != "gate_message"]
+    events = _infonet_sync_response_events(events, request=request)
     return {
         "events": events,
         "after_hash": base,
@@ -5586,6 +5891,7 @@ async def infonet_ingest(request: Request):
 
     result = infonet.ingest_events(events)
     _hydrate_gate_store_from_chain(events)
+    _hydrate_dm_relay_from_chain(events)
     return {"ok": True, **result}
 
 
@@ -5626,6 +5932,7 @@ async def infonet_peer_push(request: Request):
 
     result = infonet.ingest_events(events)
     _hydrate_gate_store_from_chain(events)
+    _hydrate_dm_relay_from_chain(events)
     return {"ok": True, **result}
 
 
@@ -6185,6 +6492,12 @@ async def infonet_event(request: Request, event_id: str):
                 )
             return _strip_gate_for_access(evt, access)
         return {"ok": False, "detail": "Event not found"}
+    if evt.get("event_type") == "dm_message":
+        return await _private_plane_refusal_response(
+            request,
+            status_code=403,
+            payload=_private_plane_access_denied_payload(),
+        )
     if evt.get("event_type") == "gate_message":
         gate_id = str(evt.get("payload", {}).get("gate", "") or evt.get("gate", "") or "").strip()
         access = _verify_gate_access(request, gate_id) if gate_id else ""
@@ -6209,7 +6522,7 @@ async def infonet_node_events(
     from services.mesh.mesh_hashchain import infonet
 
     events = infonet.get_events_by_node(node_id, limit=limit)
-    events = [e for e in events if e.get("event_type") != "gate_message"]
+    events = [e for e in events if e.get("event_type") not in {"gate_message", "dm_message"}]
     events = [_redact_public_event(e) for e in infonet.decorate_events(events)]
     events = _redact_public_node_history(
         events,
@@ -6234,7 +6547,7 @@ async def infonet_events_by_type(
     else:
         events = list(reversed(infonet.events))
         events = events[offset : offset + limit]
-    events = [e for e in events if e.get("event_type") != "gate_message"]
+    events = [e for e in events if e.get("event_type") not in {"gate_message", "dm_message"}]
     events = [_redact_public_event(e) for e in infonet.decorate_events(events)]
     return {
         "events": events,
@@ -6972,6 +7285,7 @@ async def _dm_send_from_signed_request(request: Request):
     relay_salt_hex = str(body.get("relay_salt", "") or "").strip().lower()
     msg_id = str(body.get("msg_id", "")).strip()
     timestamp = _safe_int(body.get("timestamp", 0) or 0)
+    sequence = _safe_int(body.get("sequence", 0) or 0)
     nonce = str(body.get("nonce", "")).strip()
 
     if not sender_id or not recipient_id or not ciphertext or not msg_id or not timestamp:
@@ -7045,7 +7359,7 @@ async def _dm_send_from_signed_request(request: Request):
         ok_seq, seq_reason = _validate_private_signed_sequence(
             infonet,
             sender_id,
-            int(body.get("sequence", 0) or 0),
+            sequence,
             domain="dm_send",
         )
         if not ok_seq:
@@ -7079,7 +7393,47 @@ async def _dm_send_from_signed_request(request: Request):
         "sender_seal": sender_seal,
         "relay_salt": relay_salt_hex,
     }
+    hashchain_spool: dict[str, Any] = {"ok": False, "detail": "not attempted"}
+    try:
+        from services.mesh.mesh_hashchain import infonet
+
+        chain_payload = dict(prepared.payload if prepared is not None else {})
+        if not chain_payload:
+            chain_payload = {
+                "recipient_id": recipient_id,
+                "delivery_class": delivery_class,
+                "recipient_token": recipient_token if delivery_class == "shared" else "",
+                "ciphertext": ciphertext,
+                "msg_id": msg_id,
+                "timestamp": timestamp,
+                "format": payload_format,
+            }
+        chain_payload["transport_lock"] = "private_strong"
+        chain_event = infonet.append_private_dm_message(
+            node_id=sender_id,
+            payload=chain_payload,
+            signature=str(prepared.signature if prepared is not None else body.get("signature", "") or ""),
+            sequence=sequence,
+            public_key=str(prepared.public_key if prepared is not None else body.get("public_key", "") or ""),
+            public_key_algo=str(
+                prepared.public_key_algo if prepared is not None else body.get("public_key_algo", "") or ""
+            ),
+            protocol_version=str(
+                prepared.protocol_version if prepared is not None else body.get("protocol_version", "") or ""
+            )
+            or PROTOCOL_VERSION,
+            timestamp=float(timestamp or time.time()),
+        )
+        _hydrate_dm_relay_from_chain([chain_event])
+        hashchain_spool = {
+            "ok": True,
+            "event_id": str(chain_event.get("event_id", "") or ""),
+            "limit": 2,
+        }
+    except Exception as exc:
+        hashchain_spool = {"ok": False, "detail": str(exc) or type(exc).__name__}
     queued_result = _queue_dm_release(current_tier=tier, payload=release_payload)
+    queued_result["hashchain_spool"] = hashchain_spool
     if transport_upgrade_pending:
         queued_result["private_transport_pending"] = True
     return queued_result
@@ -8141,8 +8495,12 @@ def _cctv_proxy_profile_for_url(target_url: str) -> _CCTVProxyProfile:
 
 
 def _cctv_upstream_headers(request: Request, profile: _CCTVProxyProfile) -> dict[str, str]:
+    # Round 7a: per-install operator handle. See routers/cctv.py for the
+    # canonical handler; this duplicate stays in lockstep until the #239
+    # dedup ladder removes it.
+    from services.network_utils import outbound_user_agent
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; ShadowBroker CCTV proxy)",
+        "User-Agent": f"Mozilla/5.0 (compatible; {outbound_user_agent('cctv-proxy')})",
         **profile.headers,
     }
     range_header = request.headers.get("range")
@@ -8813,9 +9171,14 @@ async def api_uw_flow(request: Request):
 from services.news_feed_config import get_feeds, save_feeds, reset_feeds
 
 
-@app.get("/api/settings/news-feeds")
+@app.get(
+    "/api/settings/news-feeds",
+    dependencies=[Depends(require_local_operator)],
+)
 @limiter.limit("30/minute")
 async def api_get_news_feeds(request: Request):
+    """Issue #252 (tg12): gated on local-operator. See the canonical
+    handler in backend/routers/admin.py for the full rationale."""
     return get_feeds()
 
 
@@ -9018,9 +9381,22 @@ class NodeSettingsUpdate(BaseModel):
 @app.get("/api/settings/node")
 @limiter.limit("30/minute")
 async def api_get_node_settings(request: Request):
+    """Issue #243 (tg12): node mode and participant state are
+    operational posture. Anonymous callers receive an empty stub —
+    enough for the UI to know the endpoint exists but nothing
+    fingerprintable. Authenticated callers see the full state.
+
+    Authenticated == local-operator (loopback / Docker bridge) OR an
+    admin / scoped-view token. The Tauri shell and Docker frontend
+    container both qualify via their existing transport (PR #263 +
+    PR #278), so legitimate operator UX is unchanged.
+    """
     from services.node_settings import read_node_settings
 
     data = await asyncio.to_thread(read_node_settings)
+    authenticated = _scoped_view_authenticated(request, "node")
+    if not authenticated:
+        return {}
     return {
         **data,
         "node_mode": _current_node_mode(),
@@ -9033,6 +9409,11 @@ async def api_get_node_settings(request: Request):
 async def api_set_node_settings(request: Request, body: NodeSettingsUpdate):
     _refresh_node_peer_store()
     if bool(body.enabled):
+        if _infonet_private_transport_required() and not _ensure_infonet_private_transport_ready("operator_enable"):
+            return JSONResponse(
+                {"ok": False, "detail": _infonet_private_transport_error()},
+                status_code=503,
+            )
         try:
             from services.transport_lane_isolation import disable_public_mesh_lane
 
@@ -9041,6 +9422,7 @@ async def api_set_node_settings(request: Request, body: NodeSettingsUpdate):
             logger.warning("Failed to disable public Mesh while enabling private node: %s", exc)
     result = _set_participant_node_enabled(bool(body.enabled))
     if bool(body.enabled):
+        _start_infonet_node_runtime("operator_enable")
         _kick_public_sync_background("operator_enable")
     return result
 

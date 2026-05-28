@@ -76,6 +76,13 @@ function canRun(command, args) {
   return !result.error && result.status === 0;
 }
 
+function canRunBackendPython(pythonBin) {
+  return (
+    canRun(pythonBin, ["-V"]) &&
+    canRun(pythonBin, ["-c", "import fastapi, uvicorn"])
+  );
+}
+
 function findBasePython() {
   const candidates = isWindows
     ? [
@@ -135,12 +142,12 @@ function rebuildBackendVenv(targetDir, basePython) {
   if (result.error || result.status !== 0) {
     return null;
   }
-  return canRun(repairedBin, ["-V"]) ? repairedBin : null;
+  return canRunBackendPython(repairedBin) ? repairedBin : null;
 }
 
 function ensureBackendVenv() {
   for (const candidate of venvCandidates) {
-    if (fs.existsSync(candidate) && canRun(candidate, ["-V"])) {
+    if (fs.existsSync(candidate) && canRunBackendPython(candidate)) {
       persistSelectedVenv(candidate);
       return candidate;
     }

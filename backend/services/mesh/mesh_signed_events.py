@@ -38,6 +38,11 @@ _REVOCATION_TTL_CACHE: dict[str, dict[str, Any]] = {}
 _REVOCATION_TTL_LOCK = threading.Lock()
 _REVOCATION_REFRESH_LOCK = threading.Lock()
 _REVOCATION_REFRESH_FAIL_FAST_WINDOW_S = 5.0
+
+
+def _request_scope_path(request: Request) -> str:
+    scope = getattr(request, "scope", {}) or {}
+    return str(scope.get("path") or "")
 _REVOCATION_REFRESH_RETRY_AFTER_S = 5
 _REVOCATION_PRECHECK_UNAVAILABLE_DETAIL = "Signed event integrity preflight unavailable"
 
@@ -166,7 +171,7 @@ def _canonical_signed_write_retry_payload(
     signed_context = build_signed_context(
         event_type=prepared.event_type,
         kind=prepared.kind.value,
-        endpoint=str(request.url.path or ""),
+        endpoint=_request_scope_path(request),
         lane_floor=_content_private_required_transport_tier(prepared.kind),
         sequence_domain=_signed_context_sequence_domain(prepared),
         node_id=prepared.node_id,
@@ -540,7 +545,7 @@ def _apply_signed_context_policy(prepared: "PreparedSignedWrite", request: Reque
     ok, reason = validate_signed_context(
         event_type=prepared.event_type,
         kind=prepared.kind.value,
-        endpoint=str(request.url.path or ""),
+        endpoint=_request_scope_path(request),
         lane_floor=_content_private_required_transport_tier(prepared.kind),
         sequence_domain=_signed_context_sequence_domain(prepared),
         node_id=prepared.node_id,

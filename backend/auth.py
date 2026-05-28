@@ -45,6 +45,7 @@ from services.mesh.mesh_compatibility import (
 from services.mesh.mesh_crypto import (
     _derive_peer_key,
     normalize_peer_url,
+    resolve_peer_key_for_url,
     verify_signature,
     verify_node_binding,
     parse_public_key_algo,
@@ -112,8 +113,14 @@ def _scoped_admin_tokens() -> dict[str, list[str]]:
     return normalized
 
 
+def _request_scope_path(request: Request) -> str:
+    """Return the ASGI request-line path, not the Host-derived URL path."""
+    scope = getattr(request, "scope", {}) or {}
+    return str(scope.get("path") or "")
+
+
 def _required_scope_for_request(request: Request) -> str:
-    path = str(request.url.path or "")
+    path = _request_scope_path(request)
     if path.startswith("/api/wormhole/gate/"):
         return "gate"
     if path.startswith("/api/wormhole/dm/"):
@@ -245,15 +252,90 @@ def _docker_bridge_local_operator_enabled() -> bool:
     }
 
 
+# Issue #250 (tg12): the previous implementation returned True for any IP
+# in the entire 172.16.0.0/12 range. Anyone with `docker run` access on
+# the same daemon could spin up a container that automatically passed
+# local-operator auth. The fix narrows trust to ONLY connections whose
+# source IP matches the configured frontend container's hostname.
+#
+# Docker DNS resolves both the compose service name (``frontend``) and
+# the explicit ``container_name`` (``shadowbroker-frontend``) to the
+# frontend container's bridge IP. We forward-resolve both, cache the
+# result for 30s, and only trust connections from those exact IPs.
+#
+# Operators on shared Docker hosts get the benefit of the narrower
+# surface. Operators on single-user installs see no behavior change —
+# their frontend container still resolves and is still trusted.
+_DOCKER_BRIDGE_TRUST_CACHE: dict = {"ips": frozenset(), "expires": 0.0}
+_DOCKER_BRIDGE_TRUST_TTL = 30.0
+
+
+def _trusted_bridge_frontend_hostnames() -> list[str]:
+    """Container hostnames whose IPs we treat as local-operator on the bridge.
+
+    Default covers both Docker Compose service name (``frontend``) and the
+    explicit ``container_name`` from the shipped docker-compose.yml
+    (``shadowbroker-frontend``). Operators with non-default names can
+    override via the ``SHADOWBROKER_TRUSTED_FRONTEND_HOSTS`` env var
+    (comma-separated, no spaces).
+    """
+    raw = str(
+        os.environ.get(
+            "SHADOWBROKER_TRUSTED_FRONTEND_HOSTS",
+            "frontend,shadowbroker-frontend",
+        )
+    ).strip()
+    return [h.strip() for h in raw.split(",") if h.strip()]
+
+
+def _resolve_trusted_bridge_ips() -> frozenset[str]:
+    """Resolve trusted frontend hostnames to a set of IPs, with caching.
+
+    Cached for 30s so we don't hit DNS on every request. The cache is
+    process-local — frontend container IP rotations during a backend's
+    lifetime will be picked up within 30s.
+
+    Returns frozenset() if Docker DNS can't resolve any of the configured
+    hostnames (fail-closed — when in doubt, refuse to trust the bridge).
+    """
+    import socket
+    import time as _time
+
+    now = _time.time()
+    cache = _DOCKER_BRIDGE_TRUST_CACHE
+    if cache["expires"] > now:
+        return cache["ips"]
+
+    ips: set[str] = set()
+    for hostname in _trusted_bridge_frontend_hostnames():
+        try:
+            _, _, addrs = socket.gethostbyname_ex(hostname)
+        except (OSError, socket.gaierror):
+            continue
+        for addr in addrs:
+            ips.add(addr)
+
+    resolved = frozenset(ips)
+    cache["ips"] = resolved
+    cache["expires"] = now + _DOCKER_BRIDGE_TRUST_TTL
+    return resolved
+
+
 def _is_docker_bridge_host(host: str) -> bool:
+    """Return True only when the source IP matches our trusted frontend
+    container hostname(s).
+
+    Previously trusted any 172.16.0.0/12 IP unconditionally. See the
+    block comment above for the security rationale.
+    """
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return False
-    # Docker Desktop and the default compose bridge normally sit inside
-    # 172.16.0.0/12. Keep this narrower than "any private IP" so a user who
-    # intentionally binds the backend to LAN does not silently trust LAN clients.
-    return ip in ipaddress.ip_network("172.16.0.0/12")
+    # Public IPs are never our frontend container — skip DNS work for them.
+    if not ip.is_private:
+        return False
+    return host in _resolve_trusted_bridge_ips()
 
 
 def _is_trusted_local_runtime_host(host: str) -> bool:
@@ -367,7 +449,7 @@ async def _verify_openclaw_hmac(request: Request) -> bool:
 
     # Compute expected signature: HMAC-SHA256(secret, METHOD|path|ts|nonce|body_digest)
     method = str(request.method or "").upper()
-    path = str(request.url.path or "")
+    path = _request_scope_path(request)
     message = f"{method}|{path}|{ts_str}|{nonce}|{body_digest}"
     expected = hmac.new(
         secret.encode("utf-8"),
@@ -668,8 +750,7 @@ def _is_debug_test_request(request: Request) -> bool:
     if not _debug_mode_enabled():
         return False
     client_host = (request.client.host or "").lower() if request.client else ""
-    url_host = (request.url.hostname or "").lower() if request.url else ""
-    return client_host == "test" or url_host == "test"
+    return client_host == "test"
 
 
 # ---------------------------------------------------------------------------
@@ -1321,18 +1402,19 @@ def _peer_hmac_url_from_request(request: Request) -> str:
     header_url = normalize_peer_url(str(request.headers.get("x-peer-url", "") or ""))
     if header_url:
         return header_url
-    if not request.url:
-        return ""
-    base_url = f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
-    return normalize_peer_url(base_url)
+    return ""
 
 
 def _verify_peer_push_hmac(request: Request, body_bytes: bytes) -> bool:
-    """Verify HMAC-SHA256 peer authentication on push requests."""
-    secret = str(get_settings().MESH_PEER_PUSH_SECRET or "").strip()
-    if not secret:
-        return False
+    """Verify HMAC-SHA256 peer authentication on push requests.
 
+    Issue #256: ``resolve_peer_key_for_url`` looks up a per-peer secret
+    in ``MESH_PEER_SECRETS`` first, then falls back to the global
+    ``MESH_PEER_PUSH_SECRET``. When a peer URL is listed in the per-peer
+    map, only the listed secret is accepted for it — the global secret
+    is ignored, so any peer that knows only the global secret cannot
+    forge a request claiming to be that peer.
+    """
     provided = str(request.headers.get("x-peer-hmac", "") or "").strip()
     if not provided:
         return False
@@ -1341,7 +1423,7 @@ def _verify_peer_push_hmac(request: Request, body_bytes: bytes) -> bool:
     allowed_peers = set(authenticated_push_peer_urls())
     if not peer_url or peer_url not in allowed_peers:
         return False
-    peer_key = _derive_peer_key(secret, peer_url)
+    peer_key = resolve_peer_key_for_url(peer_url)
     if not peer_key:
         return False
 

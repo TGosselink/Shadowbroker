@@ -174,7 +174,7 @@ ShadowBroker v0.9.7 ships **InfoNet** (decentralized intelligence mesh + Soverei
 | Channel | Privacy Status | Details |
 |---|---|---|
 | **Meshtastic / APRS** | **PUBLIC** | RF radio transmissions are public and interceptable by design. |
-| **InfoNet Gate Chat** | **OBFUSCATED** | Messages are obfuscated with gate personas and canonical payload signing, but NOT end-to-end encrypted. Metadata is not hidden. |
+| **InfoNet Gate Chat** | **OBFUSCATED** | Messages are obfuscated with gate personas and canonical payload signing, but NOT end-to-end encrypted. Metadata is not hidden despite being designed through Tor and Reticulum (Work in progress). |
 | **Dead Drop DMs** | **STRONGEST CURRENT LANE** | Token-based epoch mailbox with SAS word verification. Strongest lane in this build, but not yet confidently private. |
 | **Sovereign Shell governance** | **PUBLIC LEDGER** | Petitions, votes, upgrade hashes, and dispute stakes are signed events on a public hashchain. Pseudonymous via gate persona, but governance actions are intentionally observable. |
 | **Privacy primitives (RingCT / stealth / DEX)** | **NOT YET WIRED** | Locked Protocol contracts are in place, but the cryptographic scheme has not been chosen. The privacy-core Rust crate is the integration target for a future sprint. |
@@ -199,7 +199,7 @@ The first decentralized intelligence communication and governance layer built di
 
 **Communication layer (since v0.9.6):**
 
-* **InfoNet Experimental Testnet** — A global, obfuscated message relay. Anyone running ShadowBroker can transmit and receive on the InfoNet. Messages pass through a Wormhole relay layer with gate personas, Ed25519 canonical payload signing, and transport obfuscation.
+* **InfoNet Experimental Testnet** — A global, obfuscated message relay using Tor and Reticulum. Anyone running ShadowBroker can transmit and receive on the InfoNet. Messages pass through a Wormhole relay layer with gate personas, Ed25519 canonical payload signing, and transport obfuscation.
 * **Mesh Chat Panel** — Three-tab interface: **INFONET** (gate chat with obfuscated transport), **MESH** (Meshtastic radio integration), **DEAD DROP** (peer-to-peer message exchange with token-based epoch mailboxes — strongest current lane).
 * **Gate Persona System** — Pseudonymous identities with Ed25519 signing keys, prekey bundles, SAS word contact verification, and abuse reporting.
 * **Mesh Terminal** — Built-in CLI: `send`, `dm`, market commands, gate state inspection. Draggable panel, minimizes to the top bar. Type `help` to see all commands.

@@ -20,129 +20,82 @@ import {
   Heart,
 } from 'lucide-react';
 
-const CURRENT_VERSION = '0.9.79';
+const CURRENT_VERSION = '0.9.81';
 const STORAGE_KEY = `shadowbroker_changelog_v${CURRENT_VERSION}`;
-const RELEASE_TITLE = 'Onboarding, Live Feeds, Mesh, and Agent Hardening';
+const RELEASE_TITLE = 'Signed Auto-Update + Update Button Race Fix';
 
 const HEADLINE_FEATURES = [
   {
-    icon: <Bot size={20} className="text-purple-400" />,
+    icon: <KeyRound size={20} className="text-purple-400" />,
     accent: 'purple' as const,
-    title: 'Agentic onboarding for OpenClaw-compatible agents',
-    subtitle: 'First-time setup now includes local/direct agent connection, access-tier selection, copyable HMAC setup, and optional Tor hidden-service prep.',
+    title: 'Signed Auto-Update Going Forward (one manual hop)',
+    subtitle: 'After installing v0.9.81, the in-app Update button finally works end-to-end. This release establishes a fresh signing key — every release from here is a one-click upgrade.',
     details: [
-      'The onboarding flow can generate the local agent connection bundle through the existing HMAC API, point agents at /api/ai/tools, and let operators choose restricted read-only or full write access before connecting an agent.',
-      'Remote mode is labeled honestly: .onion exposes the signed HTTP agent API over Tor. Wormhole/MLS is not claimed as the current agent command transport.',
-      'The setup copy works for OpenClaw, Hermes, or any custom agent that implements the documented HMAC request contract.',
+      'tauri.conf.json now carries a fresh minisign pubkey (the previous keypair was generated before v0.9.79 shipped but the matching private key was lost before any release was actually signed, so no release before v0.9.81 has working auto-update).',
+      'The v0.9.81 release artifacts ship with a signed latest.json + .sig files so every install on v0.9.81 or later can verify and apply the next release automatically via the Tauri updater plugin.',
+      'One-time cost: if you are upgrading from v0.9.79 or v0.9.8, the click-Update path falls back to a manual download because the new pubkey does not match the one baked into your install. Click the MANUAL DOWNLOAD button in the update dialog → grab the .msi from the release page → run it → from then on auto-update works in-app.',
     ],
-    callToAction: 'OPEN FIRST-TIME SETUP -> AI AGENT',
+    callToAction: 'CLICK UPDATE → DOWNLOAD MSI ONCE → AUTO-UPDATE FOREVER',
   },
   {
-    icon: <Bot size={20} className="text-purple-400" />,
-    accent: 'purple' as const,
-    title: 'Agentic AI Channel — supports OpenClaw and any HMAC-signing agent',
-    subtitle: 'ShadowBroker now exposes a signed agent command channel. Bring your own agent (OpenClaw, Claude Code, GPT, LangChain, or a custom client) and drive the dashboard from any LLM that speaks the protocol.',
-    details: [
-      'A signed command channel (POST /api/ai/channel/command) plus a batched concurrent-execution endpoint (up to 20 tool calls per round-trip via /api/ai/channel/batch). Agents query flights, ships, SIGINT, news, and intel layers; reason over the live mesh; and run market or threat analyses without a human in the loop.',
-      'HMAC-SHA256 request signing with timestamp + nonce replay protection. Tier-gated access (restricted vs full) governs which read and write commands the agent can invoke. Every call is auditable through the channel log.',
-      'ShadowBroker does not bundle an LLM, an agent runtime, or model weights — it ships the protocol. Any agent that signs requests with the documented HMAC contract can connect. OpenClaw is the reference implementation.',
-    ],
-    callToAction: 'CONNECT YOUR AGENT \u2192 /API/AI/CHANNEL/COMMAND',
-  },
-  {
-    icon: <Network size={20} className="text-cyan-400" />,
+    icon: <Network size={20} className="text-amber-400" />,
     accent: 'cyan' as const,
-    title: 'InfoNet Testnet \u2014 Framework, Privacy, and a Path to Decentralized Intelligence',
-    subtitle: 'The testnet now ships its full governance economy and the runway for a privacy-preserving decentralized intelligence platform.',
+    title: 'AIS Maritime Resilience — Outage Banner + AISHub Fallback',
+    subtitle: 'When AISStream’s WebSocket goes offline (as happened upstream in May 2026), the ships layer no longer goes silently empty.',
     details: [
-      'Sovereign Shell views: petitions (governance DSL covers parameter updates and feature toggles), upgrade-hash voting (80% supermajority, 67% Heavy-Node activation), evidence submission, dispute markets, gate suspension and shutdown, and bootstrap eligible-node-one-vote. Every write action is a clickable form with verbatim diagnostics on rejection.',
-      'Privacy primitive runway: locked Protocol contracts for ring signatures, stealth addresses, shielded balances, and DEX matching. The privacy-core Rust crate is the integration target. Function Keys (anonymous citizenship proof) ship 5 of 6 pieces; only blind-signature issuance waits on a primitive decision.',
-      'Backbone: two-tier event state with epoch finality, identity rotation, progressive penalties, ramp milestones, and constitutional invariants enforced via MappingProxyType. Sprint 11+ wires the cryptographic primitives into the locked Protocols.',
-      'Still an experimental testnet \u2014 no privacy guarantee yet. Treat all channels as public until E2E and the privacy primitives ship.',
+      'AIS proxy health surfaces in /api/health: connected, last_msg_age_seconds, proxy_spawn_count. A dismissible amber banner explains the outage (“Ship data temporarily unavailable — AISStream upstream is offline”) instead of letting users assume their install is broken.',
+      'AISHub REST fallback (free tier at aishub.net/api). Polls every 20 minutes when the primary is disconnected and merges vessels into the same store with source: “aishub” so existing tooling attributes the provider.',
+      'Live data wins races: if the WebSocket reconnects mid-poll, fresh AISStream updates aren’t overwritten by stale REST records. Opt-in via AISHUB_USERNAME; cadence configurable via AISHUB_POLL_INTERVAL_MINUTES (clamped [1, 360]).',
     ],
-    callToAction: 'OPEN SOVEREIGN SHELL \u2192 PETITIONS \u2022 UPGRADES \u2022 GATES',
+    callToAction: 'SET AISHUB_USERNAME \u2192 RESTART BACKEND',
+  },
+  {
+    icon: <Shield size={20} className="text-cyan-400" />,
+    accent: 'cyan' as const,
+    title: 'Data-Layer Repair \u2014 UAP Cutoff + GPS Jamming Detection',
+    subtitle: 'Two long-broken layers fixed at the source. UFO sightings are actually recent now; GPS jamming zones actually fire.',
+    details: [
+      'UAP sightings: the Hugging Face NUFORC mirror fallback had no date cutoff, so when the live nuforc.org scrape failed the layer served 3-year-old reports as \u201crecent\u201d. Now drops rows older than 60 days and logs loudly when the mirror is fully stale. Scheduler moved daily \u2192 weekly (Mondays 12:00 UTC).',
+      'GPS jamming: three stacked filters meant the layer almost never lit up. nac_p == 0 (\u201cGPS lock lost\u201d) was filtered out as if it were an old transponder \u2014 it\u2019s actually the strongest jamming signal. Now counted. MIN_AIRCRAFT lowered 5 \u2192 3 so sparser hotspots clear; MIN_RATIO lowered 0.30 \u2192 0.20.',
+      'Both layers now surface their own outages via assert_canary so operators see broken vs empty, not silently stale.',
+    ],
+    callToAction: 'TOGGLE UAP \u2022 GPS JAMMING LAYERS',
   },
 ];
 
 const NEW_FEATURES = [
   {
-    icon: <Clock size={18} className="text-cyan-400" />,
-    title: 'Startup and Feed Responsiveness Pass',
-    desc: 'Map-critical feeds now lean on startup caches and priority preload behavior so the dashboard can paint before heavyweight synthesis jobs finish.',
-  },
-  {
-    icon: <Network size={18} className="text-green-400" />,
-    title: 'MeshChat MQTT Settings',
-    desc: 'Public MeshChat stays opt-in and now has an in-panel settings lane for broker, port, username, password, and channel PSK while remaining separated from Wormhole/private mode.',
+    icon: <Plane size={18} className="text-orange-400" />,
+    title: 'Cumulative Fuel & CO2 per Flight',
+    desc: 'Aircraft tooltip now shows how much fuel each plane has actually burned in the air since first observation, not just the per-hour rate. 15-minute gap between sightings resets the session; 24-hour clamp protects against clock skew; per-icao prune every 5 minutes keeps memory bounded.',
   },
   {
     icon: <Plane size={18} className="text-cyan-400" />,
-    title: 'Selected Entity Trails',
-    desc: 'Flight and vessel trails are drawn only for selected assets, reducing global clutter while still exposing movement history for unknown-route entities.',
+    title: 'Per-Flight Source Attribution',
+    desc: 'Every aircraft record now carries a source field (adsb.lol, OpenSky, airplanes.live, adsb.fi) so consumers can attribute the data provider. Pre-fix, adsb.lol records were unmarked while OpenSky records were explicitly tagged, making it look like adsb.lol was unused even though it is the primary source.',
   },
   {
-    icon: <Plane size={18} className="text-amber-400" />,
-    title: 'Aircraft Detail Cards',
-    desc: 'Commercial aircraft stay airline-first, while private and general aviation aircraft can show model-focused Wiki context and imagery when available.',
+    icon: <Network size={18} className="text-green-400" />,
+    title: 'Cross-Node DM Mailbox Replication',
+    desc: 'Direct messages now replicate across mesh nodes when one party is offline. Per-(sender, recipient) anti-spam cap enforced as a network rule (not client-side) so source-code tampering cannot bypass it.',
   },
   {
-    icon: <Cpu size={18} className="text-purple-400" />,
-    title: 'AI Batch Command Channel',
-    desc: 'POST up to 20 tool calls in a single HTTP round-trip; the backend executes them concurrently and returns a fan-out result map. Cuts agent latency by an order of magnitude over sequential calls.',
-  },
-  {
-    icon: <Scale size={18} className="text-amber-400" />,
-    title: 'Governance DSL — Petition-Driven Parameter Changes',
-    desc: 'Type-safe payload executor for UPDATE_PARAM, BATCH_UPDATE_PARAMS, ENABLE_FEATURE, and DISABLE_FEATURE petitions. Tunable knobs change on-chain via a vote — no code deploys required.',
-  },
-  {
-    icon: <GitBranch size={18} className="text-purple-400" />,
-    title: 'Upgrade-Hash Governance',
-    desc: 'Protocol upgrades that need new logic (not just parameter changes) vote on a SHA-256 hash of the verified release. 80% supermajority, 40% quorum, 67% Heavy-Node activation. Lifecycle: signatures, voting, challenge window, awaiting readiness, activated.',
-  },
-  {
-    icon: <KeyRound size={18} className="text-purple-400" />,
-    title: 'Function Keys — Anonymous Citizenship Proof',
-    desc: 'A citizen proves "I am an Infonet citizen" without revealing their Infonet identity. 5 of 6 pieces shipped: nullifiers, challenge-response, two-phase commit receipts, enumerated denial codes, batched settlement. Issuance via blind signatures waits on a primitive decision.',
-  },
-  {
-    icon: <Shield size={18} className="text-cyan-400" />,
-    title: 'Privacy Primitive Runway',
-    desc: 'Locked Protocol contracts in services/infonet/privacy/contracts.py for ring signatures, stealth addresses, Pedersen commitments, range proofs, and DEX matching. The privacy-core Rust crate is the integration target — no caller of the privacy module needs to know which scheme is active.',
-  },
-  {
-    icon: <Layers size={18} className="text-blue-400" />,
-    title: 'Two-Tier State + Epoch Finality',
-    desc: 'Tier 1 events propagate CRDT-style for low latency; Tier 2 events require epoch finality before they can be acted on. Identity rotation, progressive penalties, ramp milestones, and constitutional invariants are enforced via MappingProxyType.',
-  },
-  {
-    icon: <Terminal size={18} className="text-cyan-400" />,
-    title: 'Sovereign Shell Write Surface',
-    desc: 'PetitionsView, UpgradeView, ResolutionView, GateShutdownView, BootstrapView, and FunctionKeyView each expose every Sprint 4-8 + 10 write action as a clickable form. Adaptive polling tightens to 8 seconds during active voting/challenge phases.',
-  },
-  {
-    icon: <Clock size={18} className="text-pink-400" />,
-    title: 'Time Machine — Snapshot Playback',
-    desc: 'Scrub backward through saved telemetry. Live polling pauses on entry to snapshot mode, the map redraws from the recorded snapshot, and moving entities interpolate between recorded frames. Hourly index lets you jump to any captured timestamp; pressing Live restores the current feed instantly.',
-  },
-  {
-    icon: <Satellite size={18} className="text-orange-400" />,
-    title: 'SAR Satellite Telemetry — ASF, OPERA, Copernicus',
-    desc: 'New SAR (Synthetic Aperture Radar) layer. Mode A (default-on) pulls free catalog metadata from the Alaska Satellite Facility — no account required. Mode B (two-step opt-in) ingests pre-processed ground-change anomalies from NASA OPERA, Copernicus EGMS, GFM, EMS, and UNOSAT — deformation, flood, and damage assessments. Integrates with OpenClaw so agents can read and act on SAR anomalies; broadcasts default to private-tier transport (Tor / RNS).',
+    icon: <Clock size={18} className="text-amber-400" />,
+    title: 'Infonet Sync — HTTP 429 Honored',
+    desc: 'When an upstream peer returns Retry-After, the node now waits exactly that long instead of retrying every 60 seconds and keeping the upstream rate-limit bucket permanently full. Exponential backoff on consecutive failures capped at 30 minutes.',
   },
 ];
 
 const BUG_FIXES = [
-  'Docker proxy and backend port handling hardened so changing the host backend port does not require changing the internal service contract.',
-  'Global Threat Intercept and live-data startup paths no longer wait on slow-tier synthesis before cached data can paint the UI.',
-  'MeshChat and Infonet statuses now separate public MQTT participation, private Wormhole mode, and local node bootstrap so the UI does not imply the wrong connection state.',
-  'Commercial aircraft detail cards no longer show a confusing model image alongside the airline card.',
-  'Sovereign Shell adaptive polling — voting and challenge windows refresh every 8 seconds while active, every 30 to 60 seconds when idle. Voting feels live without a websocket layer.',
-  'Per-row write actions (petitions, upgrades, disputes) hold isolated submission state so concurrent forms no longer share a single in-flight slot.',
-  'Verbatim diagnostic surfacing on every write button. The backend reason text is always shown on rejection — no opaque "denied" toasts.',
-  'Evidence submission canonicalization matches Python repr() exactly, so client-side SHA-256 hashes round-trip cleanly through the chain.',
-  'Function Keys copy is context-agnostic — citizenship proof is described abstractly, not tied to a specific use case.',
-  'Post-cutover legacy mesh files (mesh_schema.py, mesh_signed_events.py, mesh_hashchain.py) hash-verified against the recorded baseline; the chain extension hook stays surgical.',
+  'Update button no longer throws "admin_session_required" on desktop installs. The initial updateAction now syncs to Tauri detection at React-init time (window.__TAURI__ is injected before mount), so a click before the async runtime probe completes opens the GitHub release page in a browser instead of POSTing to /api/system/update.',
+  'Desktop installer now bundles defusedxml + PySocks (declared in pyproject.toml but missing from the venv shipped with v0.9.79 and the initial v0.9.8 publish). Fixes the bundled-backend launch crash reported in #319 and #296 (managed_backend_exited_early:exit code: 103).',
+  'UAP layer no longer serves 3-year-old NUFORC sightings via the Hugging Face static-mirror fallback (60-day cutoff now applied to the fallback path too).',
+  'GPS jamming detection now counts nac_p == 0 (the actual GPS-lost signal) instead of filtering it out as an old-transponder artifact.',
+  'GPS jamming thresholds lowered (MIN_AIRCRAFT 5 → 3, MIN_RATIO 0.30 → 0.20) so sparser hotspots clear the bar without losing the 1-aircraft noise cushion.',
+  'AIS layer surfaces an outage banner when the AISStream WebSocket upstream is offline, instead of silently showing an empty ocean.',
+  'Flight emissions tooltip now shows cumulative fuel/CO2 since first observation, not just the per-hour rate.',
+  'Per-aircraft observation tracker (15-min reopen gap, 24-hour clamp) survives trail-rendering cache pruning so cumulative counters do not reset mid-flight.',
+  'UAP scheduler moved daily → weekly (Mondays 12:00 UTC) to match the layer’s rolling-window cadence and reduce upstream load.',
 ];
 
 const CONTRIBUTORS = [

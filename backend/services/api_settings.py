@@ -150,6 +150,31 @@ API_REGISTRY = [
         "url": "https://finnhub.io/register",
         "required": False,
     },
+    # Issue #298 (tg12): Sentinel Hub / Copernicus Data Space Ecosystem
+    # credentials were previously held in browser localStorage / sessionStorage
+    # by the Settings panel. Moved server-side to the same .env-backed
+    # store every other third-party API key lives in. The Sentinel proxy
+    # routes (POST /api/sentinel/token, /tile) now fall back to these
+    # env values when the request body omits credentials — see
+    # backend/routers/tools.py for the resolution order.
+    {
+        "id": "sentinel_client_id",
+        "env_key": "SENTINEL_CLIENT_ID",
+        "name": "Sentinel Hub / Copernicus — Client ID",
+        "description": "OAuth2 client ID for Copernicus Data Space Ecosystem (CDSE). Required for the Sentinel-2 imagery overlay and the right-click Sentinel-2 Intel Card. Sign in at dataspace.copernicus.eu and create OAuth credentials.",
+        "category": "Imagery",
+        "url": "https://dataspace.copernicus.eu/",
+        "required": False,
+    },
+    {
+        "id": "sentinel_client_secret",
+        "env_key": "SENTINEL_CLIENT_SECRET",
+        "name": "Sentinel Hub / Copernicus — Client Secret",
+        "description": "OAuth2 client secret paired with the Client ID above. Used by the backend to mint short-lived access tokens against the CDSE identity provider. Stored in the backend .env; never sent to the browser.",
+        "category": "Imagery",
+        "url": "https://dataspace.copernicus.eu/",
+        "required": False,
+    },
 ]
 
 ALLOWED_ENV_KEYS = {

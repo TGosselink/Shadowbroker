@@ -82,9 +82,40 @@ async def api_get_keys_meta(request: Request):
     return get_env_path_info()
 
 
-@router.get("/api/settings/news-feeds")
+@router.get(
+    "/api/settings/operator-handle",
+    dependencies=[Depends(require_local_operator)],
+)
+@limiter.limit("60/minute")
+async def api_get_operator_handle(request: Request):
+    """Round 7a: return the per-install operator handle so the frontend
+    can include it in browser-direct third-party API calls (Wikipedia /
+    Wikidata via lib/wikimediaClient). The handle is auto-generated on
+    first use; operators can override it via the OPERATOR_HANDLE setting
+    or the env var of the same name.
+
+    Gated on local-operator: legitimate browser usage goes through the
+    Next.js proxy which auto-attaches the admin key; remote scanners get
+    403. The handle itself isn't a secret (it's sent to every third-party
+    API the operator touches), but admin-gating it matches the rest of
+    the settings endpoints and follows least-privilege.
+    """
+    from services.network_utils import get_operator_handle
+    return {"handle": get_operator_handle()}
+
+
+@router.get(
+    "/api/settings/news-feeds",
+    dependencies=[Depends(require_local_operator)],
+)
 @limiter.limit("30/minute")
 async def api_get_news_feeds(request: Request):
+    """Issue #252 (tg12): the curated feed inventory is configuration
+    state, not a public data feed. Gated on local-operator so the
+    Tauri shell, the Docker bridge frontend, and any caller with an
+    admin key all see the full list; anonymous LAN/internet callers
+    can no longer enumerate operator source URLs.
+    """
     from services.news_feed_config import get_feeds
     return get_feeds()
 
@@ -118,9 +149,18 @@ async def api_reset_news_feeds(request: Request):
 @router.get("/api/settings/node")
 @limiter.limit("30/minute")
 async def api_get_node_settings(request: Request):
+    """Issue #243 (tg12): node_mode and node_enabled are operational
+    posture. Anonymous callers receive an empty stub; authenticated
+    callers (local-operator or admin/scoped token) see the full
+    state. See the canonical handler in backend/main.py for the full
+    rationale.
+    """
     import asyncio
+    from auth import _scoped_view_authenticated
     from services.node_settings import read_node_settings
     data = await asyncio.to_thread(read_node_settings)
+    if not _scoped_view_authenticated(request, "node"):
+        return {}
     return {
         **data,
         "node_mode": _current_node_mode(),
@@ -210,9 +250,19 @@ async def api_set_meshtastic_mqtt_settings(request: Request, body: MeshtasticMqt
     return _meshtastic_runtime_snapshot()
 
 
-@router.get("/api/settings/timemachine")
+@router.get(
+    "/api/settings/timemachine",
+    dependencies=[Depends(require_local_operator)],
+)
 @limiter.limit("30/minute")
 async def api_get_timemachine_settings(request: Request):
+    """Issue #253 (tg12): archival-capture posture is operationally
+    sensitive — it tells a remote caller whether this deployment is
+    retaining replayable historical surveillance data. Gated on
+    local-operator so the Tauri shell and Docker bridge frontend
+    still see the toggle state, but anonymous LAN/internet callers
+    can no longer fingerprint Time Machine state.
+    """
     import asyncio
     from services.node_settings import read_node_settings
     data = await asyncio.to_thread(read_node_settings)

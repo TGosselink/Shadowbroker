@@ -777,6 +777,39 @@ def start_scheduler():
         misfire_grace_time=60,
     )
 
+    # Flight observation pruning — drops icao24 → first_seen_at entries we
+    # haven't seen in an hour. Same cadence as AIS prune for symmetry; the
+    # per-tick scan is O(in-flight aircraft) so it's cheap.
+    from services.fetchers.flight_observations import prune as _prune_flight_observations
+    _scheduler.add_job(
+        lambda: _run_task_with_health(_prune_flight_observations, "prune_flight_observations"),
+        "interval",
+        minutes=5,
+        id="flight_observation_prune",
+        max_instances=1,
+        misfire_grace_time=60,
+    )
+
+    # AISHub REST fallback — slow polling when the AISStream WebSocket
+    # primary is offline. Configurable interval via
+    # AISHUB_POLL_INTERVAL_MINUTES env (default 20 min). Operator must
+    # set AISHUB_USERNAME to opt in. The fetcher is gated internally on
+    # the primary being disconnected, so this job is cheap when the
+    # WebSocket is healthy (early-returns after a status check).
+    from services.fetchers.aishub_fallback import (
+        aishub_poll_interval_minutes,
+        fetch_aishub_vessels,
+    )
+    _aishub_interval = aishub_poll_interval_minutes()
+    _scheduler.add_job(
+        lambda: _run_task_with_health(fetch_aishub_vessels, "fetch_aishub_vessels"),
+        "interval",
+        minutes=_aishub_interval,
+        id="aishub_fallback",
+        max_instances=1,
+        misfire_grace_time=120,
+    )
+
     # Route database — bulk refresh from vrs-standing-data.adsb.lol every 5
     # days. Replaces the legacy /api/0/routeset POST (blocked under our UA,
     # and broken upstream). Airline schedules change on a quarterly cycle,
@@ -960,16 +993,19 @@ def start_scheduler():
         misfire_grace_time=600,
     )
 
-    # UAP sightings (NUFORC) — daily at 12:00 UTC
+    # UAP sightings (NUFORC) — weekly on Mondays at 12:00 UTC. The layer is a
+    # rolling last-60-days digest; refreshing once a week is enough cadence
+    # for human-readable map exploration and keeps load on nuforc.org light.
     _scheduler.add_job(
         lambda: _run_task_with_health(
             lambda: fetch_uap_sightings(force_refresh=True),
             "fetch_uap_sightings",
         ),
         "cron",
+        day_of_week="mon",
         hour=12,
         minute=0,
-        id="uap_sightings_daily",
+        id="uap_sightings_weekly",
         max_instances=1,
         misfire_grace_time=3600,
     )

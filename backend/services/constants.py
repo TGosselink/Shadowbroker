@@ -11,8 +11,13 @@ DEFAULT_TRAIL_TTL_S = 300  # 5 min - trail TTL for non-tracked flights
 HOLD_PATTERN_DEGREES = 300  # Total heading change to flag holding pattern
 GPS_JAMMING_NACP_THRESHOLD = 8  # NACp below this = degraded GPS signal
 GPS_JAMMING_GRID_SIZE = 1.0  # 1 degree grid for aggregation
-GPS_JAMMING_MIN_RATIO = 0.30  # 30% degraded aircraft to flag zone
-GPS_JAMMING_MIN_AIRCRAFT = 5  # Min aircraft in grid cell for statistical significance
+# Tuned 2026-05: previously 0.30 / 5 aircraft which — combined with the
+# -1 noise cushion in the detector AND the pre-fix nac_p==0 filter that
+# discarded jamming victims — meant the layer almost never lit up.
+# Lowering the bar so genuine jamming zones with sparser ADS-B coverage
+# clear (eastern Med, Russia/Ukraine border, Iran/Iraq).
+GPS_JAMMING_MIN_RATIO = 0.20  # 20% degraded aircraft to flag zone
+GPS_JAMMING_MIN_AIRCRAFT = 3  # Min aircraft in grid cell for statistical significance
 
 # ─── Network & Circuit Breaker ──────────────────────────────────────────────
 CIRCUIT_BREAKER_TTL_S = 120  # Skip domain for 2 min after total failure

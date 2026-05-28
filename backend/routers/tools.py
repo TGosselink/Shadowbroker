@@ -85,7 +85,30 @@ async def api_geocode_reverse(
     return await asyncio.to_thread(reverse_geocode, lat, lng, local_only)
 
 
-@router.get("/api/sentinel2/search")
+# ── Sentinel proxy routes (Issue #299/#300/#301, reported by tg12) ──────────
+# These three endpoints relay external Sentinel / Planetary Computer
+# requests through the backend to avoid browser CORS blocks. They are
+# operator-only helpers — they MUST NOT be callable by anonymous remote
+# users, because:
+#
+#   * /api/sentinel/token  — caller supplies their own Sentinel client_id +
+#     client_secret. Without operator gating, the backend becomes a free
+#     anonymous OAuth-mint relay for any Copernicus account.
+#   * /api/sentinel/tile   — same shape as the token route but for tile
+#     imagery. Without gating, the backend acts as an anonymous quota and
+#     bandwidth relay for Sentinel Hub Process API calls.
+#   * /api/sentinel2/search — hits the Planetary Computer STAC search API
+#     and falls back to Esri imagery. No caller credentials are involved,
+#     but the route is still an anonymous external-search relay. We gate
+#     it the same way for consistency with the rest of the operator-only
+#     helper surface.
+#
+# Gating is via require_local_operator (loopback / bridge / admin key),
+# matching the same allowlist already used by /api/region-dossier and
+# the other operator helpers further up this file. Single-operator nodes
+# see no behavior change — their dashboard already lives on loopback or
+# the trusted Docker bridge, so it still resolves.
+@router.get("/api/sentinel2/search", dependencies=[Depends(require_local_operator)])
 @limiter.limit("30/minute")
 def api_sentinel2_search(
     request: Request,
@@ -97,18 +120,60 @@ def api_sentinel2_search(
     return search_sentinel2_scene(lat, lng)
 
 
-@router.post("/api/sentinel/token")
+# Issue #298 (tg12): Sentinel credentials moved server-side
+# ---------------------------------------------------------------------------
+# Previously the frontend kept Copernicus CDSE client_id + client_secret in
+# browser localStorage / sessionStorage and forwarded them on every tile
+# request through this proxy. That exposed real third-party credentials to
+# any same-origin script (XSS, malicious browser extension, dev-tools HAR
+# export).
+#
+# Resolution order (first match wins):
+#   1. Request body — kept for back-compat. A small number of legacy
+#      operator setups may still post credentials; we don't break them.
+#   2. Backend .env — SENTINEL_CLIENT_ID / SENTINEL_CLIENT_SECRET, managed
+#      through the existing /api/settings/api-keys flow (admin-gated).
+#
+# The frontend in ``sentinelHub.ts`` no longer reads browser storage and no
+# longer forwards credentials — every dashboard request now lands in (2).
+# The require_local_operator gate (added in #303/PR #303) stays — both layers
+# are independent: the gate blocks anonymous callers, the env fallback lets
+# legitimate (gated) callers omit credentials from the body.
+# ---------------------------------------------------------------------------
+def _resolve_sentinel_credentials(body_id: str, body_secret: str) -> tuple[str, str]:
+    """Return (client_id, client_secret) using body values when present,
+    otherwise falling back to backend .env. Empty strings if neither is set."""
+    import os as _os
+    cid = (body_id or "").strip() or (_os.environ.get("SENTINEL_CLIENT_ID", "") or "").strip()
+    csec = (body_secret or "").strip() or (_os.environ.get("SENTINEL_CLIENT_SECRET", "") or "").strip()
+    return cid, csec
+
+
+@router.post("/api/sentinel/token", dependencies=[Depends(require_local_operator)])
 @limiter.limit("60/minute")
 async def api_sentinel_token(request: Request):
-    """Proxy Copernicus CDSE OAuth2 token request (avoids browser CORS block)."""
+    """Proxy Copernicus CDSE OAuth2 token request (avoids browser CORS block).
+
+    Credentials are resolved by ``_resolve_sentinel_credentials`` — body
+    fields are honored for back-compat, otherwise the backend .env values
+    populated through ``/api/settings/api-keys`` are used.
+    """
     import requests as req
     body = await request.body()
     from urllib.parse import parse_qs
     params = parse_qs(body.decode("utf-8"))
-    client_id = params.get("client_id", [""])[0]
-    client_secret = params.get("client_secret", [""])[0]
+    body_id = params.get("client_id", [""])[0]
+    body_secret = params.get("client_secret", [""])[0]
+    client_id, client_secret = _resolve_sentinel_credentials(body_id, body_secret)
     if not client_id or not client_secret:
-        raise HTTPException(400, "client_id and client_secret required")
+        # Friendly, non-hostile error — points the operator at the place
+        # they configure other API keys instead of just saying "required".
+        raise HTTPException(
+            400,
+            "Sentinel client_id/client_secret are not configured. "
+            "Set SENTINEL_CLIENT_ID and SENTINEL_CLIENT_SECRET in the "
+            "API Keys panel (Settings → API Keys) or your backend .env.",
+        )
     token_url = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
     try:
         resp = await asyncio.to_thread(req.post, token_url,
@@ -120,10 +185,39 @@ async def api_sentinel_token(request: Request):
         raise HTTPException(502, "Token request failed")
 
 
-_sh_token_cache: dict = {"token": None, "expiry": 0, "client_id": ""}
+# Cache key is an HMAC of (client_id, client_secret) — a caller cannot hit
+# this cache without knowing the same secret that originally populated it.
+# Without this binding, the lookup only checked client_id, so anyone who
+# knew a valid client_id could reuse another caller's cached token (and
+# burn their Copernicus quota / access tiles on their account).
+_sh_token_cache: dict = {"token": None, "expiry": 0, "credential_fp": ""}
 
 
-@router.post("/api/sentinel/tile")
+def _credential_fingerprint(client_id: str, client_secret: str) -> str:
+    """Return a stable, secret-binding fingerprint for the Sentinel cache key.
+
+    Uses HMAC-SHA256 so the raw secret is never stored in process memory as
+    a cache key. The HMAC key is a per-process random value, which means the
+    fingerprint cannot be precomputed across restarts (additional defense
+    against an attacker who learned a valid client_id but not the secret).
+    """
+    import hashlib
+    import hmac
+
+    return hmac.new(
+        _SH_TOKEN_CACHE_HMAC_KEY,
+        f"{client_id}\x00{client_secret}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+# Per-process random HMAC key. Regenerated on each backend startup so cached
+# fingerprints don't survive restarts.
+import os as _os
+_SH_TOKEN_CACHE_HMAC_KEY = _os.urandom(32)
+
+
+@router.post("/api/sentinel/tile", dependencies=[Depends(require_local_operator)])
 @limiter.limit("300/minute")
 async def api_sentinel_tile(request: Request):
     """Proxy Sentinel Hub Process API tile request (avoids CORS block)."""
@@ -134,8 +228,11 @@ async def api_sentinel_tile(request: Request):
     except Exception:
         return JSONResponse(status_code=422, content={"ok": False, "detail": "invalid JSON body"})
 
-    client_id = body.get("client_id", "")
-    client_secret = body.get("client_secret", "")
+    # Issue #298: same resolution order as /api/sentinel/token — body
+    # values for back-compat, otherwise backend .env.
+    body_id = body.get("client_id", "")
+    body_secret = body.get("client_secret", "")
+    client_id, client_secret = _resolve_sentinel_credentials(body_id, body_secret)
     preset = body.get("preset", "TRUE-COLOR")
     date_str = body.get("date", "")
     z = body.get("z", 0)
@@ -143,10 +240,21 @@ async def api_sentinel_tile(request: Request):
     y = body.get("y", 0)
 
     if not client_id or not client_secret or not date_str:
-        raise HTTPException(400, "client_id, client_secret, and date required")
+        # Distinguish "no creds" from "no date" so the operator knows
+        # what to fix. Same friendly pointer as the /token route.
+        if not client_id or not client_secret:
+            raise HTTPException(
+                400,
+                "Sentinel client_id/client_secret are not configured. "
+                "Set SENTINEL_CLIENT_ID and SENTINEL_CLIENT_SECRET in the "
+                "API Keys panel (Settings → API Keys) or your backend .env.",
+            )
+        raise HTTPException(400, "date required")
 
     now = _time.time()
-    if (_sh_token_cache["token"] and _sh_token_cache["client_id"] == client_id
+    credential_fp = _credential_fingerprint(client_id, client_secret)
+    if (_sh_token_cache["token"]
+            and _sh_token_cache["credential_fp"] == credential_fp
             and now < _sh_token_cache["expiry"] - 30):
         token = _sh_token_cache["token"]
     else:
@@ -161,7 +269,7 @@ async def api_sentinel_tile(request: Request):
             token = tdata["access_token"]
             _sh_token_cache["token"] = token
             _sh_token_cache["expiry"] = now + tdata.get("expires_in", 300)
-            _sh_token_cache["client_id"] = client_id
+            _sh_token_cache["credential_fp"] = credential_fp
         except HTTPException:
             raise
         except Exception:

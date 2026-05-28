@@ -160,8 +160,13 @@ router = APIRouter()
 
 # --- Constants ---
 
-_WORMHOLE_PUBLIC_SETTINGS_FIELDS = {"enabled", "transport", "anonymous_mode"}
-_WORMHOLE_PUBLIC_PROFILE_FIELDS = {"profile", "wormhole_enabled"}
+# Issue #243 (tg12): the public redaction now exposes only the bare
+# "is this on?" boolean. Transport choice, anonymous-mode state, and
+# the named privacy profile were all leaking actionable recon to
+# unauthenticated callers and are now gated behind authenticated reads.
+# See the matching block in backend/main.py for the full rationale.
+_WORMHOLE_PUBLIC_SETTINGS_FIELDS = {"enabled"}
+_WORMHOLE_PUBLIC_PROFILE_FIELDS = {"wormhole_enabled"}
 _PRIVATE_LANE_CONTROL_FIELDS = {"private_lane_tier", "private_lane_policy"}
 _PUBLIC_RNS_STATUS_FIELDS = {"enabled", "ready", "configured_peers", "active_peers"}
 _NODE_PUBLIC_EVENT_HOOK_REGISTERED = False
@@ -793,19 +798,19 @@ async def api_wormhole_gate_leave(request: Request, body: WormholeGateRequest):
     return leave_gate(str(body.gate_id or ""))
 
 
-@router.get("/api/wormhole/gate/{gate_id}/identity")
+@router.get("/api/wormhole/gate/{gate_id}/identity", dependencies=[Depends(require_local_operator)])
 @limiter.limit("30/minute")
 async def api_wormhole_gate_identity(request: Request, gate_id: str):
     return get_active_gate_identity(gate_id)
 
 
-@router.get("/api/wormhole/gate/{gate_id}/personas")
+@router.get("/api/wormhole/gate/{gate_id}/personas", dependencies=[Depends(require_local_operator)])
 @limiter.limit("30/minute")
 async def api_wormhole_gate_personas(request: Request, gate_id: str):
     return list_gate_personas(gate_id)
 
 
-@router.get("/api/wormhole/gate/{gate_id}/key")
+@router.get("/api/wormhole/gate/{gate_id}/key", dependencies=[Depends(require_local_operator)])
 @limiter.limit("30/minute")
 async def api_wormhole_gate_key_status(request: Request, gate_id: str):
     import main as _m

@@ -7,6 +7,7 @@ import requests
 from services.network_utils import fetch_with_curl
 from services.fetchers._store import latest_data, _data_lock, _mark_fresh
 from services.fetchers.emissions import get_emissions_info
+from services.fetchers.flight_observations import record_observation as _record_flight_observation
 from services.fetchers.plane_alert import enrich_with_plane_alert
 
 logger = logging.getLogger("services.data_fetcher")
@@ -171,6 +172,7 @@ def fetch_military_flights():
                 h = a.get("hex", "").lower()
                 if h and h not in seen_hex:
                     seen_hex.add(h)
+                    a["source"] = "adsb.lol"
                     all_mil_ac.append(a)
     except Exception as e:
         logger.warning(f"adsb.lol mil fetch failed: {e}")
@@ -182,6 +184,7 @@ def fetch_military_flights():
                 h = a.get("hex", "").lower()
                 if h and h not in seen_hex:
                     seen_hex.add(h)
+                    a["source"] = "airplanes.live"
                     all_mil_ac.append(a)
             logger.info(f"airplanes.live mil: +{len(resp2.json().get('ac', []))} raw, {len(all_mil_ac)} total unique")
     except Exception as e:
@@ -234,6 +237,7 @@ def fetch_military_flights():
                             "registration": f.get("r", "N/A"),
                             "icao24": icao_hex,
                             "squawk": f.get("squawk", ""),
+                            "source": f.get("source") or "adsb.lol",
                         })
                         continue
 
@@ -258,7 +262,8 @@ def fetch_military_flights():
                         "model": f.get("t", "Unknown"),
                         "icao24": icao_hex,
                         "speed_knots": speed_knots,
-                        "squawk": f.get("squawk", "")
+                        "squawk": f.get("squawk", ""),
+                        "source": f.get("source") or "adsb.lol",
                     })
                 except Exception as loop_e:
                     logger.error(f"Mil flight interpolation error: {loop_e}")
@@ -296,6 +301,18 @@ def fetch_military_flights():
         if model:
             emissions = get_emissions_info(model)
             if emissions:
+                # Cumulative fuel/CO2 since first observation — mirrors
+                # the civilian path in flights._classify_and_publish.
+                observed_seconds = _record_flight_observation(
+                    mf.get("icao24") or ""
+                )
+                elapsed_h = observed_seconds / 3600.0
+                emissions = {
+                    **emissions,
+                    "observed_seconds": observed_seconds,
+                    "fuel_gallons_burned": round(emissions["fuel_gph"] * elapsed_h, 1),
+                    "co2_kg_emitted": round(emissions["co2_kg_per_hour"] * elapsed_h, 1),
+                }
                 mf["emissions"] = emissions
         if mf.get("alert_category"):
             mf["type"] = "tracked_flight"

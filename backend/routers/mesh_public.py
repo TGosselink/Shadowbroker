@@ -65,6 +65,7 @@ from services.mesh.mesh_signed_events import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+_INFONET_SYNC_RATE_LIMIT = "600/minute"
 
 
 def _signed_body(request: Request) -> dict[str, Any]:
@@ -261,6 +262,19 @@ def _redact_vote_gate(event: dict) -> dict:
 def _redact_public_event(event: dict) -> dict:
     """Apply all public-response redactions for public chain endpoints."""
     return _redact_vote_gate(_redact_key_rotate_payload(_redact_gate_metadata(event)))
+
+
+def _infonet_private_transport_required() -> bool:
+    import main as _m
+
+    return bool(_m._infonet_private_transport_required())
+
+
+def _infonet_sync_response_events(events: list[dict], request=None) -> list[dict]:
+    """Build the sync event surface for the current transport policy."""
+    import main as _m
+
+    return _m._infonet_sync_response_events(events, request=request)
 
 
 def _trusted_gate_reply_to(event: dict) -> str:
@@ -573,6 +587,12 @@ def _hydrate_gate_store_from_chain(events: list[dict]) -> int:
         except Exception:
             pass
     return count
+
+
+def _hydrate_dm_relay_from_chain(events: list[dict]) -> int:
+    import main as _m
+
+    return int(_m._hydrate_dm_relay_from_chain(events))
 
 # --- Safe type helpers ---
 
@@ -1467,25 +1487,37 @@ def _submit_gate_message_envelope(request: Request, gate_id: str, body: dict[str
 @router.get("/api/mesh/infonet/status")
 @limiter.limit("30/minute")
 async def infonet_status(request: Request, verify_signatures: bool = False):
-    """Get Infonet metadata — event counts, head hash, chain size."""
+    """Get Infonet metadata — event counts, head hash, chain size.
+
+    The ``verify_signatures`` query parameter is honored ONLY when the
+    caller has authenticated via scoped auth or local-operator credentials.
+    Verifying every signature in a long chain is O(n_events) work — letting
+    anonymous callers trigger it is a DoS surface (issue #207). For
+    anonymous callers we silently fall back to the cheap path; the response
+    structure is identical so legitimate frontends see no behavior change.
+    """
     from services.mesh.mesh_hashchain import infonet
     from services.wormhole_supervisor import get_wormhole_state
 
+    # Silently downgrade for unauthenticated callers — no error surfaced.
+    authenticated = _scoped_view_authenticated(request, "mesh.audit")
+    effective_verify_signatures = bool(verify_signatures) and authenticated
+
     info = infonet.get_info()
-    valid, reason = infonet.validate_chain(verify_signatures=verify_signatures)
+    valid, reason = infonet.validate_chain(verify_signatures=effective_verify_signatures)
     try:
         wormhole = get_wormhole_state()
     except Exception:
         wormhole = {"configured": False, "ready": False, "rns_ready": False}
     info["valid"] = valid
     info["validation"] = reason
-    info["verify_signatures"] = verify_signatures
+    info["verify_signatures"] = effective_verify_signatures
     info["private_lane_tier"] = _current_private_lane_tier(wormhole)
     info["private_lane_policy"] = _private_infonet_policy_snapshot()
     info.update(_node_runtime_snapshot())
     return _redact_private_lane_control_fields(
         info,
-        authenticated=_scoped_view_authenticated(request, "mesh.audit"),
+        authenticated=authenticated,
     )
 
 
@@ -1519,7 +1551,7 @@ async def infonet_locator(request: Request, limit: int = Query(32, ge=4, le=128)
 
 
 @router.post("/api/mesh/infonet/sync")
-@limiter.limit("30/minute")
+@limiter.limit(_INFONET_SYNC_RATE_LIMIT)
 @mesh_write_exempt(MeshWriteExemption.PEER_GOSSIP)
 async def infonet_sync_post(
     request: Request,
@@ -1572,8 +1604,7 @@ async def infonet_sync_post(
     elif matched_hash == GENESIS_HASH and len(locator) > 1:
         forked = True
 
-    # Filter out legacy gate_message events — not part of the public sync surface.
-    events = [_redact_public_event(e) for e in events if e.get("event_type") != "gate_message"]
+    events = _infonet_sync_response_events(events, request=request)
 
     response = {
         "events": events,
@@ -1634,7 +1665,7 @@ async def mesh_rns_status(request: Request):
 
 
 @router.get("/api/mesh/infonet/sync")
-@limiter.limit("30/minute")
+@limiter.limit(_INFONET_SYNC_RATE_LIMIT)
 async def infonet_sync(
     request: Request,
     after_hash: str = "",
@@ -1672,8 +1703,7 @@ async def infonet_sync(
         )
     base = after_hash or GENESIS_HASH
     events = infonet.get_events_after(base, limit=limit)
-    # Filter out legacy gate_message events — not part of the public sync surface.
-    events = [_redact_public_event(e) for e in events if e.get("event_type") != "gate_message"]
+    events = _infonet_sync_response_events(events, request=request)
     return {
         "events": events,
         "after_hash": base,
@@ -1712,6 +1742,7 @@ async def infonet_ingest(request: Request):
 
     result = infonet.ingest_events(events)
     _hydrate_gate_store_from_chain(events)
+    _hydrate_dm_relay_from_chain(events)
     return {"ok": True, **result}
 
 
@@ -2267,6 +2298,12 @@ async def infonet_event(request: Request, event_id: str):
                 )
             return _strip_gate_for_access(evt, access)
         return {"ok": False, "detail": "Event not found"}
+    if evt.get("event_type") == "dm_message":
+        return await _private_plane_refusal_response(
+            request,
+            status_code=403,
+            payload=_private_plane_access_denied_payload(),
+        )
     if evt.get("event_type") == "gate_message":
         gate_id = str(evt.get("payload", {}).get("gate", "") or evt.get("gate", "") or "").strip()
         access = _verify_gate_access(request, gate_id) if gate_id else ""
@@ -2291,7 +2328,7 @@ async def infonet_node_events(
     from services.mesh.mesh_hashchain import infonet
 
     events = infonet.get_events_by_node(node_id, limit=limit)
-    events = [e for e in events if e.get("event_type") != "gate_message"]
+    events = [e for e in events if e.get("event_type") not in {"gate_message", "dm_message"}]
     events = [_redact_public_event(e) for e in infonet.decorate_events(events)]
     events = _redact_public_node_history(
         events,
@@ -2316,7 +2353,7 @@ async def infonet_events_by_type(
     else:
         events = list(reversed(infonet.events))
         events = events[offset : offset + limit]
-    events = [e for e in events if e.get("event_type") != "gate_message"]
+    events = [e for e in events if e.get("event_type") not in {"gate_message", "dm_message"}]
     events = [_redact_public_event(e) for e in infonet.decorate_events(events)]
     return {
         "events": events,

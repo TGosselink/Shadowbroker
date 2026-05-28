@@ -8,6 +8,13 @@ from datetime import datetime
 from urllib.parse import urljoin, urlparse
 from services.network_utils import fetch_with_curl
 
+
+
+def _geopolitics_user_agent() -> str:
+    """Round 7a: GDELT geopolitics fetcher attribution."""
+    from services.network_utils import outbound_user_agent
+    return outbound_user_agent("geopolitics-gdelt")
+
 logger = logging.getLogger(__name__)
 
 # Cache Frontline data for 30 minutes, it doesn't move that fast
@@ -316,7 +323,7 @@ def _fetch_article_title(url):
             resp = requests.get(
                 current_url,
                 timeout=4,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; OSINT Dashboard/1.0)"},
+                headers={"User-Agent": _geopolitics_user_agent()},
                 stream=True,
                 allow_redirects=False,
             )
@@ -521,10 +528,29 @@ def _parse_gdelt_export_zip(zip_bytes, conflict_codes, seen_locs, features, loc_
         logger.warning(f"Failed to parse GDELT export zip: {e}")
 
 
+# GDELT's data.gdeltproject.org is a CNAME to a Google Cloud Storage
+# bucket of the same name. GCS returns the wildcard ``*.storage.googleapis.com``
+# certificate, which legitimately does NOT cover the GDELT custom domain
+# — Python's TLS verification correctly refuses it. Some networks/POPs
+# happen to route through a path where this works; many do not (notably
+# Docker Desktop's outbound NAT on local installs).
+#
+# Fix: rewrite the URL to hit GCS directly with a path-style bucket
+# reference, where the standard GCS cert is genuinely valid. Same data,
+# verified TLS, no operator-side workaround needed.
+def _gcs_direct_gdelt_url(url: str) -> str:
+    """If ``url`` points at data.gdeltproject.org, return the equivalent
+    GCS-direct URL. Otherwise return the URL unchanged."""
+    prefix = "://data.gdeltproject.org/"
+    if prefix in url:
+        return url.replace(prefix, "://storage.googleapis.com/data.gdeltproject.org/", 1)
+    return url
+
+
 def _download_gdelt_export(url):
     """Download a single GDELT export file, return bytes or None."""
     try:
-        res = fetch_with_curl(url, timeout=15)
+        res = fetch_with_curl(_gcs_direct_gdelt_url(url), timeout=15)
         if res.status_code == 200:
             return res.content
     except (ConnectionError, TimeoutError, OSError):  # non-critical
@@ -616,9 +642,16 @@ def fetch_global_military_incidents():
     try:
         logger.info("Fetching GDELT events via export CDN (multi-file)...")
 
-        # Get the latest export URL to determine current timestamp
+        # Get the latest export URL to determine current timestamp.
+        # HTTPS is used to prevent passive network observers from injecting
+        # poisoned export records into the global incident map via MITM.
+        # GDELT serves the same content over HTTPS as HTTP.
+        # Use the GCS-direct URL because data.gdeltproject.org's CNAME
+        # serves a wildcard *.storage.googleapis.com cert that legitimately
+        # doesn't cover the GDELT hostname. See _gcs_direct_gdelt_url above.
         index_res = fetch_with_curl(
-            "http://data.gdeltproject.org/gdeltv2/lastupdate.txt", timeout=10
+            _gcs_direct_gdelt_url("https://data.gdeltproject.org/gdeltv2/lastupdate.txt"),
+            timeout=10,
         )
         if index_res.status_code != 200:
             logger.error(f"GDELT lastupdate failed: {index_res.status_code}")
@@ -636,7 +669,9 @@ def fetch_global_military_incidents():
             logger.error("Could not find GDELT export URL")
             return []
 
-        # Extract timestamp from URL like: http://data.gdeltproject.org/gdeltv2/20260301120000.export.CSV.zip
+        # Extract timestamp from URL like: https://data.gdeltproject.org/gdeltv2/20260301120000.export.CSV.zip
+        # (GDELT's lastupdate.txt may still list URLs with http:// — we ignore
+        # the scheme there and reconstruct each download URL as https:// below.)
         import re
 
         ts_match = re.search(r"(\d{14})\.export\.CSV\.zip", latest_url)
@@ -652,7 +687,7 @@ def fetch_global_military_incidents():
         for i in range(NUM_FILES):
             ts = latest_ts - timedelta(minutes=15 * i)
             fname = ts.strftime("%Y%m%d%H%M%S") + ".export.CSV.zip"
-            url = f"http://data.gdeltproject.org/gdeltv2/{fname}"
+            url = f"https://data.gdeltproject.org/gdeltv2/{fname}"
             urls.append(url)
 
         logger.info(f"Downloading {len(urls)} GDELT export files...")

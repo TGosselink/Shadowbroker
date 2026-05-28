@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     MESH_ARTI_ENABLED: bool = False
     MESH_ARTI_SOCKS_PORT: int = 9050
     MESH_RELAY_PEERS: str = ""
+    MESH_PUBLIC_PEER_URL: str = ""
     # Bootstrap seeds are discovery hints, not authoritative network roots.
     # Nodes promote healthy discovered peers from the store/manifest over time.
     MESH_BOOTSTRAP_SEED_PEERS: str = "http://gqpbunqbgtkcqilvclm3xrkt3zowjyl3s62kkktvojgvxzizamvbrqid.onion:8000"
@@ -53,6 +54,12 @@ class Settings(BaseSettings):
     MESH_RELAY_FAILURE_COOLDOWN_S: int = 120
     MESH_BOOTSTRAP_SEED_FAILURE_COOLDOWN_S: int = 15
     MESH_PEER_PUSH_SECRET: str = ""
+    # Issue #256 (tg12): optional per-peer HMAC secret map. Comma-separated
+    # `url=secret` pairs. When a peer URL appears here, only that per-peer
+    # secret is accepted for it — the global MESH_PEER_PUSH_SECRET above is
+    # ignored for that specific URL. Single-peer installs and unmigrated
+    # multi-peer installs leave this empty and behavior is unchanged.
+    MESH_PEER_SECRETS: str = ""
     MESH_RNS_APP_NAME: str = "shadowbroker"
     MESH_RNS_ASPECT: str = "infonet"
     MESH_RNS_IDENTITY_PATH: str = ""
@@ -110,6 +117,21 @@ class Settings(BaseSettings):
     MESH_DM_REQUEST_MAILBOX_LIMIT: int = 12
     MESH_DM_SHARED_MAILBOX_LIMIT: int = 48
     MESH_DM_SELF_MAILBOX_LIMIT: int = 12
+    # Anti-spam: cap on distinct UNACKED messages a single sender can have
+    # parked in a single recipient's mailbox at any one time. Once the
+    # recipient pulls (acks) a message, the sender's quota for that pair
+    # frees up. Default 2 — a sender who wants to deliver more must wait
+    # for the recipient to actually read the prior messages.
+    #
+    # This cap is enforced TWICE: once on the local deposit path (the
+    # sender's own node refuses to spool the 3rd message) AND once on
+    # the replication-acceptance path (honest peer relays refuse to
+    # accept inbound replicas that would put them over the cap). The
+    # double enforcement makes the rule a NETWORK rule — patching out
+    # the local check on a hostile sender's relay doesn't let extras
+    # propagate, because every honest peer enforces the same cap on
+    # inbound replication.
+    MESH_DM_PENDING_PER_SENDER_LIMIT: int = 2
     MESH_BLOCK_LEGACY_AGENT_ID_LOOKUP: bool = True
     MESH_ALLOW_COMPAT_DM_INVITE_IMPORT: bool = False
     MESH_ALLOW_COMPAT_DM_INVITE_IMPORT_UNTIL: str = ""
@@ -289,6 +311,19 @@ class Settings(BaseSettings):
     # service operator can identify per-install traffic instead of a generic
     # "ShadowBroker" aggregate.
     MESHTASTIC_OPERATOR_CALLSIGN: str = ""
+    # Per-install operator handle used in the User-Agent for EVERY third-party
+    # API the backend calls (Wikipedia, Wikidata, Nominatim, GDELT, OpenMHz,
+    # Broadcastify, weather.gov, NUFORC, etc.). The default is empty, in which
+    # case backend/services/network_utils.py auto-generates a stable
+    # pseudonymous handle like "operator-7f3a92" on first use and caches it.
+    # Operators who want to identify themselves with a real handle can set
+    # this; operators who want to stay pseudonymous can leave it empty.
+    #
+    # The handle is sent ONLY to public third-party APIs. It is NEVER mixed
+    # into mesh / Wormhole / Infonet identity (those have their own crypto
+    # identity layer; conflating the two would leak public attribution into
+    # private mesh state).
+    OPERATOR_HANDLE: str = ""
 
     # SAR (Synthetic Aperture Radar) data layer
     # Mode A — free catalog metadata, no account, default-on

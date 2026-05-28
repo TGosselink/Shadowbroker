@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { AlertTriangle, Clock, Minus, Plus, ExternalLink, Brain, Loader2 } from 'lucide-react';
 import React, { useEffect, useRef, useCallback } from 'react';
 import WikiImage from '@/components/WikiImage';
+import { fetchWikipediaSummary } from '@/lib/wikimediaClient';
 import type { SelectedEntity, RegionDossier, FimiData } from "@/types/dashboard";
 import { useDataKeys } from '@/hooks/useDataStore';
 import { API_BASE } from '@/lib/api';
@@ -203,34 +204,37 @@ function resolveAircraftWikiTitle(model: string | undefined): string | null {
     return AIRCRAFT_WIKI[model] || resolveAcTypeWiki(model);
 }
 
-// Module-level cache for Wikipedia thumbnails (persists across re-renders)
-const _wikiThumbCache: Record<string, { url: string | null; loading: boolean }> = {};
-
+// Issue #220 (tg12): the previous implementation kept its own
+// module-local Wikipedia thumbnail cache and issued anonymous fetches
+// without `Api-User-Agent`. We now delegate to lib/wikimediaClient,
+// which sends the policy-compliant header and shares one cache with
+// WikiImage and useRegionDossier.
 function useAircraftImage(model: string | undefined): { imgUrl: string | null; wikiUrl: string | null; loading: boolean } {
-    const [, forceUpdate] = useState(0);
+    const [imgUrl, setImgUrl] = useState<string | null>(null);
+    const [loading, setLoading] = useState(false);
     const wikiTitle = resolveAircraftWikiTitle(model) || undefined;
     const wikiUrl = wikiTitle ? `https://en.wikipedia.org/wiki/${wikiTitle.replace(/ /g, '_')}` : null;
 
     useEffect(() => {
-        if (!wikiTitle) return;
-        const key = wikiTitle;
-        if (_wikiThumbCache[key]) return; // Already fetched or in-flight
-        _wikiThumbCache[key] = { url: null, loading: true };
-        fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(wikiTitle)}`)
-            .then(r => r.json())
-            .then(d => {
-                _wikiThumbCache[key] = { url: d.thumbnail?.source || null, loading: false };
-                forceUpdate(n => n + 1);
-            })
-            .catch(() => {
-                _wikiThumbCache[key] = { url: null, loading: false };
-                forceUpdate(n => n + 1);
-            });
+        let cancelled = false;
+        if (!wikiTitle) {
+            setImgUrl(null);
+            setLoading(false);
+            return;
+        }
+        setLoading(true);
+        fetchWikipediaSummary(wikiTitle).then((summary) => {
+            if (cancelled) return;
+            setImgUrl(summary?.thumbnail || null);
+            setLoading(false);
+        });
+        return () => {
+            cancelled = true;
+        };
     }, [wikiTitle]);
 
     if (!wikiTitle) return { imgUrl: null, wikiUrl: null, loading: false };
-    const cached = _wikiThumbCache[wikiTitle];
-    return { imgUrl: cached?.url || null, wikiUrl, loading: cached?.loading || false };
+    return { imgUrl, wikiUrl, loading };
 }
 
 
@@ -245,34 +249,70 @@ const VESSEL_TYPE_WIKI: Record<string, string> = {
 
 type FlightTrailPoint = { lat?: number; lng?: number; alt?: number; ts?: number } | number[];
 
+function formatObservedDuration(seconds: number): string {
+    // Compact "1h 14m" / "23m" / "45s" — matches the density of the rest
+    // of the flight tooltip. < 60s is shown as "<1m" so the user knows
+    // we've JUST started observing this hex (cumulative will still be 0).
+    if (!Number.isFinite(seconds) || seconds <= 0) return '<1m';
+    if (seconds < 60) return '<1m';
+    const totalMinutes = Math.floor(seconds / 60);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    return `${minutes}m`;
+}
+
 function EmissionsEstimateBlock({ flight }: { flight: any }) {
     const emissions = flight?.emissions;
-    const context = emissions ? 'Model-based cruise estimate' : null;
+    // Cumulative fuel/CO2 since the backend first saw this hex this
+    // flight session. Prefer these big numbers — the user explicitly
+    // wanted "the actual fuel that has been burned", not the rate.
+    // Rates are still shown below as smaller context.
+    const observedSec = Number(emissions?.observed_seconds ?? 0);
+    const fuelBurned = Number(emissions?.fuel_gallons_burned ?? 0);
+    const co2Emitted = Number(emissions?.co2_kg_emitted ?? 0);
+    const haveCumulative = emissions && observedSec > 0;
 
     return (
         <div className="border-b border-[var(--border-primary)] pb-2">
             <span className="text-[var(--text-muted)] text-[10px] block mb-1.5">EMISSIONS ESTIMATE</span>
             <div className="flex gap-3">
                 <div className="flex-1 bg-[var(--bg-primary)]/50 border border-[var(--border-primary)] px-2 py-1.5">
-                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">FUEL RATE</div>
-                    <div className="text-xs font-bold text-orange-400">
-                        {emissions ? (
-                            <>{emissions.fuel_gph} <span className="text-[11px] text-[var(--text-muted)] font-normal">GPH</span></>
+                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">FUEL BURNED</div>
+                    <div className="text-sm font-bold text-orange-400">
+                        {haveCumulative ? (
+                            <>{fuelBurned.toLocaleString(undefined, { maximumFractionDigits: 1 })} <span className="text-[11px] text-[var(--text-muted)] font-normal">gal</span></>
+                        ) : emissions ? (
+                            <span className="text-[var(--text-muted)] font-normal text-xs">—</span>
                         ) : 'UNKNOWN'}
                     </div>
+                    {emissions && (
+                        <div className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                            @ {emissions.fuel_gph} gph
+                        </div>
+                    )}
                 </div>
                 <div className="flex-1 bg-[var(--bg-primary)]/50 border border-[var(--border-primary)] px-2 py-1.5">
-                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">CO2 RATE</div>
-                    <div className="text-xs font-bold text-red-400">
-                        {emissions ? (
-                            <>{emissions.co2_kg_per_hour.toLocaleString()} <span className="text-[11px] text-[var(--text-muted)] font-normal">KG/HR</span></>
+                    <div className="text-[11px] text-[var(--text-muted)] tracking-widest">CO2 EMITTED</div>
+                    <div className="text-sm font-bold text-red-400">
+                        {haveCumulative ? (
+                            <>{co2Emitted.toLocaleString(undefined, { maximumFractionDigits: 1 })} <span className="text-[11px] text-[var(--text-muted)] font-normal">kg</span></>
+                        ) : emissions ? (
+                            <span className="text-[var(--text-muted)] font-normal text-xs">—</span>
                         ) : 'UNKNOWN'}
                     </div>
+                    {emissions && (
+                        <div className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                            @ {emissions.co2_kg_per_hour.toLocaleString()} kg/hr
+                        </div>
+                    )}
                 </div>
             </div>
-            {context && (
+            {emissions && (
                 <div className="mt-1.5 text-[10px] text-[var(--text-muted)] leading-relaxed">
-                    {context}
+                    {haveCumulative
+                        ? `Observed in flight for ${formatObservedDuration(observedSec)} · model-based cruise estimate`
+                        : 'Just observed · totals will appear on next refresh'}
                 </div>
             )}
         </div>

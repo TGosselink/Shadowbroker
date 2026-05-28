@@ -70,6 +70,53 @@ import pytest
                 "message": "test",
             },
         ),
+        # Issue #198 (tg12, May 17): three gate introspection GETs leak the
+        # operator's active persona, persona inventory, and key status for
+        # any gate_id an anonymous caller knows. Defeats the unlinkability
+        # property documented in the privacy threat model.
+        ("get", "/api/wormhole/gate/general-talk/identity", None),
+        ("get", "/api/wormhole/gate/general-talk/personas", None),
+        ("get", "/api/wormhole/gate/general-talk/key", None),
+        # Issue #211 (tg12): /api/thermal/verify fans out into an expensive
+        # STAC search + remote SWIR raster reads. Unauthenticated abuse
+        # could burn Sentinel-Hub quota and outbound bandwidth.
+        ("get", "/api/thermal/verify?lat=0&lng=0&radius_km=10", None),
+        # Issue #213 (tg12): /api/radio/openmhz/calls/{sys_name} — rotating
+        # sys_name bypasses the 20s cache and hammers OpenMHZ. Risks an
+        # IP-ban for the project.
+        ("get", "/api/radio/openmhz/calls/abc", None),
+        # Issue #214 (tg12): /api/radio/openmhz/audio — anonymous bandwidth
+        # relay through the backend. 60/minute rate limit is not enough on
+        # a streaming endpoint.
+        ("get", "/api/radio/openmhz/audio?url=https%3A%2F%2Fmedia.openmhz.com%2Faudio%2Fabc.mp3", None),
+        # Issue #299 (tg12): /api/sentinel/token relays Copernicus CDSE
+        # OAuth token requests for caller-supplied client_id/secret.
+        # Anonymous access turns the backend into a free OAuth-mint relay.
+        (
+            "post",
+            "/api/sentinel/token",
+            None,  # body sent via raw form-encoded data — None lets the
+                   # remote_client wrapper send an empty body; the auth
+                   # check fires before the form parser runs.
+        ),
+        # Issue #300 (tg12): /api/sentinel/tile relays Sentinel Hub Process
+        # API tile fetches. Anonymous access is a bandwidth/quota relay
+        # for any caller's Copernicus account.
+        (
+            "post",
+            "/api/sentinel/tile",
+            {
+                "client_id": "ignored",
+                "client_secret": "ignored",
+                "preset": "TRUE-COLOR",
+                "date": "2026-01-01",
+                "z": 6, "x": 30, "y": 20,
+            },
+        ),
+        # Issue #301 (tg12): /api/sentinel2/search hits Planetary Computer
+        # STAC + Esri fallback. Anonymous access is a free external-search
+        # relay even though no caller credentials are involved.
+        ("get", "/api/sentinel2/search?lat=0&lng=0", None),
     ],
 )
 def test_remote_control_surface_rejects_without_local_operator_or_admin(

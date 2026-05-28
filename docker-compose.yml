@@ -24,10 +24,27 @@ services:
       # Private Infonet bootstrap seeds. Seeds are discovery hints, not fixed roots.
       - MESH_BOOTSTRAP_SEED_PEERS=${MESH_BOOTSTRAP_SEED_PEERS:-http://gqpbunqbgtkcqilvclm3xrkt3zowjyl3s62kkktvojgvxzizamvbrqid.onion:8000}
       - MESH_DEFAULT_SYNC_PEERS=${MESH_DEFAULT_SYNC_PEERS:-}
+      - MESH_SYNC_TIMEOUT_S=${MESH_SYNC_TIMEOUT_S:-5}
+      - MESH_RELAY_PUSH_TIMEOUT_S=${MESH_RELAY_PUSH_TIMEOUT_S:-45}
+      # Explicitly opt into HTTPS/IP-based peer sync. Default remains private transports only.
+      - MESH_INFONET_ALLOW_CLEARNET_SYNC=${MESH_INFONET_ALLOW_CLEARNET_SYNC:-false}
+      # Tor/Arti SOCKS transport for private .onion Infonet sync.
+      - MESH_ARTI_ENABLED=${MESH_ARTI_ENABLED:-false}
+      - MESH_ARTI_SOCKS_PORT=${MESH_ARTI_SOCKS_PORT:-9050}
       # Operator-trusted sync/push peers. Leave empty unless you control the peer secret on both sides.
       - MESH_RELAY_PEERS=${MESH_RELAY_PEERS:-}
+      - MESH_PUBLIC_PEER_URL=${MESH_PUBLIC_PEER_URL:-}
       # Shared transport auth for operator peer push. Must be set to a unique secret per deployment.
       - MESH_PEER_PUSH_SECRET=${MESH_PEER_PUSH_SECRET:-}
+      # Issue #256: optional per-peer HMAC secrets. Comma-separated
+      # `url=secret` pairs (no spaces). When a peer URL appears here, only
+      # the listed per-peer secret is accepted for it — the global
+      # MESH_PEER_PUSH_SECRET above is ignored for that specific URL. This
+      # closes the cross-peer impersonation surface for multi-peer fleets.
+      # Single-peer installs leave this empty (default) for unchanged
+      # behavior. Both sides of a peering must agree on the per-peer
+      # secret for a given URL.
+      - MESH_PEER_SECRETS=${MESH_PEER_SECRETS:-}
       # Meshtastic MQTT is opt-in to avoid passive load on the public broker.
       # Set MESH_MQTT_ENABLED=true in .env only when this node should join live MQTT.
       - MESH_MQTT_ENABLED=${MESH_MQTT_ENABLED:-false}
@@ -43,6 +60,23 @@ services:
       # The bundled Docker UI talks to the backend across Docker's private bridge.
       # Treat that bridge as local operator access while ports remain bound to 127.0.0.1 by default.
       - SHADOWBROKER_TRUST_DOCKER_BRIDGE_LOCAL_OPERATOR=${SHADOWBROKER_TRUST_DOCKER_BRIDGE_LOCAL_OPERATOR:-1}
+      # Issue #250: bridge trust is now bound to specific container hostnames
+      # (default: 'frontend' compose service + 'shadowbroker-frontend' container
+      # name). If you rename the frontend service or run with a different
+      # container_name, list the hostnames here (comma-separated, no spaces).
+      - SHADOWBROKER_TRUSTED_FRONTEND_HOSTS=${SHADOWBROKER_TRUSTED_FRONTEND_HOSTS:-frontend,shadowbroker-frontend}
+      # Third-party fetcher opt-ins. Default OFF — these phone home to
+      # politically/commercially sensitive upstreams (Polymarket, Kalshi,
+      # Yahoo Finance, EU disinfo trackers, NUFORC dataset host, etc.).
+      # Set to "true" in your .env only if you want the node's IP to
+      # contact each of these services. The dashboard panel for each
+      # feature reads as "no data" until the corresponding flag is on.
+      - PREDICTION_MARKETS_ENABLED=${PREDICTION_MARKETS_ENABLED:-false}
+      - FINANCIAL_ENABLED=${FINANCIAL_ENABLED:-false}
+      - CROWDTHREAT_ENABLED=${CROWDTHREAT_ENABLED:-false}
+      - FIMI_ENABLED=${FIMI_ENABLED:-false}
+      - NUFORC_ENABLED=${NUFORC_ENABLED:-false}
+      - NEWS_ENABLED=${NEWS_ENABLED:-true}
     volumes:
       - backend_data:/app/data
     restart: unless-stopped

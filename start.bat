@@ -237,6 +237,14 @@ echo [*] Backend Node.js dependencies OK.
 echo.
 echo [*] Checking privacy-core shared library...
 set "PRIVACY_CORE_DLL=%ROOT%\privacy-core\target\release\privacy_core.dll"
+:: MSI/EXE installers stage privacy_core.dll directly in backend-runtime/
+:: alongside this script. If somebody runs start.bat from an installed
+:: app directory (no source checkout, no Rust toolchain), they shouldn't
+:: see a spurious "install Rust" warning because the DLL is right next
+:: to them — just at a different path than the source-tree build.
+if not exist "%PRIVACY_CORE_DLL%" if exist "%ROOT%\privacy_core.dll" (
+    set "PRIVACY_CORE_DLL=%ROOT%\privacy_core.dll"
+)
 if not exist "%PRIVACY_CORE_DLL%" (
     where cargo >nul 2>&1
     if errorlevel 1 (

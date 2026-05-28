@@ -203,6 +203,17 @@ echo ""
 echo "[*] Checking privacy-core shared library..."
 PRIVACY_CORE_SO="$SCRIPT_DIR/privacy-core/target/release/libprivacy_core.so"
 PRIVACY_CORE_DYLIB="$SCRIPT_DIR/privacy-core/target/release/libprivacy_core.dylib"
+# MSI/AppImage/DMG installers stage the platform-specific shared library
+# directly alongside this script (in backend-runtime/). If somebody runs
+# start.sh from an installed app dir without Rust, they shouldn't see a
+# spurious "install Rust" warning — the library is right next to them,
+# just at a different path than the source-tree build.
+if [ ! -f "$PRIVACY_CORE_SO" ] && [ -f "$SCRIPT_DIR/libprivacy_core.so" ]; then
+    PRIVACY_CORE_SO="$SCRIPT_DIR/libprivacy_core.so"
+fi
+if [ ! -f "$PRIVACY_CORE_DYLIB" ] && [ -f "$SCRIPT_DIR/libprivacy_core.dylib" ]; then
+    PRIVACY_CORE_DYLIB="$SCRIPT_DIR/libprivacy_core.dylib"
+fi
 if [ ! -f "$PRIVACY_CORE_SO" ] && [ ! -f "$PRIVACY_CORE_DYLIB" ]; then
     if command -v cargo >/dev/null 2>&1; then
         echo "[*] Building privacy-core release library..."

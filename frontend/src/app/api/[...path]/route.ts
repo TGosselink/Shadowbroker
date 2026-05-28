@@ -77,6 +77,116 @@ function isSensitiveProxyPath(pathSegments: string[]): boolean {
   return false;
 }
 
+function normalizeHeaderHost(host: string | null): string {
+  return (host || '').trim().replace(/^"|"$/g, '').toLowerCase();
+}
+
+function hostnameFromHeaderHost(host: string): string {
+  const normalized = normalizeHeaderHost(host);
+  if (!normalized) return '';
+  try {
+    return new URL(`http://${normalized}`).hostname.toLowerCase();
+  } catch {
+    return normalized.replace(/:\d+$/, '').toLowerCase();
+  }
+}
+
+function isPrivateIpv4(hostname: string): boolean {
+  const parts = hostname.split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false;
+  }
+  const [first, second] = parts;
+  return first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
+}
+
+function isInternalProxyHost(host: string): boolean {
+  const hostname = hostnameFromHeaderHost(host);
+  if (!hostname || hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+    return false;
+  }
+  return (
+    !hostname.includes('.') ||
+    isPrivateIpv4(hostname) ||
+    hostname.endsWith('.internal') ||
+    hostname.endsWith('.docker')
+  );
+}
+
+function forwardedHostCandidates(req: NextRequest): string[] {
+  const hosts = new Set<string>();
+  const directHost = normalizeHeaderHost(req.headers.get('host'));
+  if (directHost) hosts.add(directHost);
+
+  if (!isInternalProxyHost(directHost)) {
+    return [...hosts];
+  }
+
+  const forwardedHost = req.headers.get('x-forwarded-host');
+  if (forwardedHost) {
+    for (const value of forwardedHost.split(',')) {
+      const host = normalizeHeaderHost(value);
+      if (host) hosts.add(host);
+    }
+  }
+
+  const forwarded = req.headers.get('forwarded');
+  if (forwarded) {
+    const hostPattern = /(?:^|[;,])\s*host=(?:"([^"]+)"|([^;,]+))/gi;
+    let match: RegExpExecArray | null;
+    while ((match = hostPattern.exec(forwarded)) !== null) {
+      const host = normalizeHeaderHost(match[1] || match[2] || '');
+      if (host) hosts.add(host);
+    }
+  }
+
+  return [...hosts];
+}
+
+/**
+ * CSRF guard for the server-side admin-key injection (issues #249 / #254).
+ *
+ * The proxy injects ``process.env.ADMIN_KEY`` into the forwarded
+ * X-Admin-Key header for sensitive backend routes. Without an origin
+ * check, any cross-origin webpage the operator visits could fire
+ * ``fetch('http://localhost:3000/api/wormhole/identity/bootstrap')`` and
+ * have that request get the operator's admin key injected for free —
+ * full identity-takeover CSRF.
+ *
+ * We allow injection when ANY of these is true:
+ *   - The request carries a valid admin session cookie (already auth'd)
+ *   - The Origin header is absent (server-to-server fetch, Tauri/Electron
+ *     native shells, curl/cli — none of these are browser-CSRF surfaces)
+ *   - The Origin header host matches the request's own Host or, when the
+ *     direct Host is an internal service name, a reverse proxy's forwarded
+ *     host (genuine same-origin browser fetch from our own dashboard,
+ *     including Docker/Traefik deployments where Host is internal)
+ *
+ * If Origin is present AND doesn't match Host, the caller is a hostile
+ * cross-origin webpage. We refuse to inject the admin key. The backend
+ * then sees the request without auth and rejects it via
+ * require_local_operator — exactly the desired outcome.
+ */
+function isSameOriginOrNonBrowser(req: NextRequest): boolean {
+  const origin = req.headers.get('origin');
+  if (!origin) {
+    // No Origin header = server-to-server / native shell / older browser
+    // doing a same-origin GET. CSRF requires the attacker to control a
+    // page running in a browser, which always sends Origin on the
+    // dangerous methods. Treat missing Origin as not-CSRF.
+    return true;
+  }
+  try {
+    const originUrl = new URL(origin);
+    const originHost = normalizeHeaderHost(originUrl.host);
+    if (!originHost) return false;
+    return forwardedHostCandidates(req).includes(originHost);
+  } catch {
+    // Malformed Origin header — be conservative.
+    return false;
+  }
+}
+
 async function proxy(req: NextRequest, pathSegments: string[]): Promise<NextResponse> {
   try {
     const isMesh = pathSegments[0] === 'mesh';
@@ -192,8 +302,23 @@ async function proxy(req: NextRequest, pathSegments: string[]): Promise<NextResp
       }
     });
     if (isSensitiveProxyPath(pathSegments)) {
+      // Issues #249 / #254: gate the server-side admin-key injection on
+      // either a valid admin session cookie OR a same-origin request.
+      // Cross-origin webpages must not silently inherit the operator's
+      // ADMIN_KEY just by being open in the same browser.
       const cookieToken = req.cookies.get(ADMIN_COOKIE)?.value || '';
-      const injectedAdmin = process.env.ADMIN_KEY || resolveAdminSessionToken(cookieToken) || '';
+      const sessionAdminKey = resolveAdminSessionToken(cookieToken) || '';
+      const allowEnvKeyInjection = isSameOriginOrNonBrowser(req);
+      let injectedAdmin = '';
+      if (sessionAdminKey) {
+        // Authenticated session always works — Origin doesn't matter
+        // because the cookie itself is same-site / strict.
+        injectedAdmin = sessionAdminKey;
+      } else if (allowEnvKeyInjection && process.env.ADMIN_KEY) {
+        // Fall back to the server-side ADMIN_KEY only for legitimate
+        // callers (same-origin dashboard, Tauri shell, server-to-server).
+        injectedAdmin = process.env.ADMIN_KEY;
+      }
       if (injectedAdmin) {
         forwardHeaders.set('X-Admin-Key', injectedAdmin);
       }

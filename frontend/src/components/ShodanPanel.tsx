@@ -576,7 +576,7 @@ export default function ShodanPanel({
                     fetch(`${API_BASE}/api/settings/api-keys`, {
                       method: 'PUT',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ env_key: 'SHODAN_API_KEY', value: shodanApiKey.trim() }),
+                      body: JSON.stringify({ SHODAN_API_KEY: shodanApiKey.trim() }),
                     })
                       .then(() => refreshStatus())
                       .finally(() => setKeySaving(false));
@@ -599,7 +599,7 @@ export default function ShodanPanel({
                   fetch(`${API_BASE}/api/settings/api-keys`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ env_key: 'SHODAN_API_KEY', value: shodanApiKey.trim() }),
+                    body: JSON.stringify({ SHODAN_API_KEY: shodanApiKey.trim() }),
                   })
                     .then(() => refreshStatus())
                     .finally(() => setKeySaving(false));

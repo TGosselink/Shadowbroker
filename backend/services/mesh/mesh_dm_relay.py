@@ -317,6 +317,39 @@ class DMRelay:
     def _self_mailbox_limit(self) -> int:
         return max(1, int(self._settings().MESH_DM_SELF_MAILBOX_LIMIT))
 
+    def _per_sender_pending_limit(self) -> int:
+        """Anti-spam cap on UNACKED messages a single sender can have parked
+        in a single recipient mailbox at any one time. See ``config.py``
+        ``MESH_DM_PENDING_PER_SENDER_LIMIT`` for the threat model — this
+        rule is enforced both at ``deposit`` (local) and at
+        ``accept_replica`` (peer push acceptance), making it a network
+        rule rather than a client-side honor system."""
+        try:
+            limit = int(getattr(self._settings(), "MESH_DM_PENDING_PER_SENDER_LIMIT", 2) or 2)
+        except (TypeError, ValueError):
+            limit = 2
+        return max(1, limit)
+
+    def _per_sender_pending_count(
+        self,
+        *,
+        mailbox_key: str,
+        sender_block_ref: str,
+    ) -> int:
+        """Count UNACKED messages from ``sender_block_ref`` currently parked
+        in ``mailbox_key``. Caller already holds ``self._lock``.
+
+        Messages that have been claimed/acked are removed from the mailbox
+        list (see ``claim_message_ids``), so anything still here is by
+        definition unacked. We count by exact ``sender_block_ref`` match
+        — that's the per-pair sender identity used for blocking too, so
+        the cap is naturally per-(sender, recipient).
+        """
+        if not mailbox_key or not sender_block_ref:
+            return 0
+        messages = self._mailboxes.get(mailbox_key, [])
+        return sum(1 for m in messages if m.sender_block_ref == sender_block_ref)
+
     def _nonce_ttl_seconds(self) -> int:
         return max(30, int(self._settings().MESH_DM_NONCE_TTL_S))
 
@@ -1515,6 +1548,29 @@ class DMRelay:
             if len(self._mailboxes[mailbox_key]) >= self._mailbox_limit_for_class(delivery_class):
                 metrics_inc("dm_drop_full")
                 return {"ok": False, "detail": "Recipient mailbox full"}
+            # Anti-spam: per-(sender, recipient) cap on unacked messages.
+            # A sender who already has the configured number of messages
+            # parked in this mailbox can't deposit more until the recipient
+            # pulls (acks) at least one. The same cap is re-enforced on
+            # inbound replication in ``accept_replica`` so this rule isn't
+            # bypassable by patching out the local check on a hostile
+            # sender's relay — see config.py
+            # MESH_DM_PENDING_PER_SENDER_LIMIT for the threat model.
+            per_sender_limit = self._per_sender_pending_limit()
+            pending = self._per_sender_pending_count(
+                mailbox_key=mailbox_key,
+                sender_block_ref=sender_block_ref,
+            )
+            if pending >= per_sender_limit:
+                metrics_inc("dm_drop_per_sender_cap")
+                return {
+                    "ok": False,
+                    "detail": (
+                        f"Recipient already has {pending} unread message"
+                        f"{'s' if pending != 1 else ''} from you. Wait for "
+                        "them to read your messages before sending more."
+                    ),
+                }
             if not msg_id:
                 msg_id = f"dm_{int(time.time() * 1000)}_{secrets.token_hex(6)}"
             elif any(m.msg_id == msg_id for m in self._mailboxes[mailbox_key]):
@@ -1539,7 +1595,244 @@ class DMRelay:
             )
             self._stats["messages_in_memory"] = sum(len(v) for v in self._mailboxes.values())
             self._save()
+            # Cross-node mailbox replication: push the freshly-stored
+            # envelope to every authenticated relay peer so the recipient
+            # can log into ANY node and find their messages. The push is
+            # async (fire-and-forget thread) so deposit() returns
+            # immediately — slow Tor peers can't block the sender's UX.
+            # Each receiving peer re-enforces the per-sender cap on
+            # acceptance, so hostile relays can't widen the cap.
+            try:
+                envelope_for_push = self.envelope_for_replication(
+                    mailbox_key=mailbox_key, msg_id=msg_id,
+                )
+                if envelope_for_push:
+                    self._replicate_envelope_to_peers_async(
+                        envelope=envelope_for_push,
+                    )
+            except Exception:
+                metrics_inc("dm_replication_push_error")
             return {"ok": True, "msg_id": msg_id}
+
+    def accept_replica(
+        self,
+        *,
+        envelope: dict[str, Any],
+        originating_peer_url: str = "",
+    ) -> dict[str, Any]:
+        """Receive a DM envelope replicated from a peer relay.
+
+        Cross-node mailbox replication entry point. When a sender's local
+        relay accepts a ``deposit`` and pushes the envelope to
+        ``MESH_RELAY_PEERS`` (so the recipient can log into any peer
+        node and find their messages), each receiving peer calls
+        ``accept_replica`` to ingest it.
+
+        The per-(sender, recipient) cap is re-enforced HERE. That's what
+        makes the rule a NETWORK rule rather than a client-side honor
+        system: a hostile sender who patches out the local ``deposit``
+        check still can't get a 3rd unacked message to spread, because
+        every honest peer enforces the same cap on inbound replicas.
+        Result: hostile relays can hold extras locally, but those extras
+        never reach any node a legitimate recipient is polling from.
+
+        Returns the same shape as ``deposit`` so the calling endpoint can
+        forward the result back to the originating peer.
+        """
+        if not isinstance(envelope, dict):
+            return {"ok": False, "detail": "envelope must be an object"}
+        msg_id = str(envelope.get("msg_id", "") or "").strip()
+        mailbox_key = str(envelope.get("mailbox_key", "") or "").strip()
+        sender_block_ref = str(envelope.get("sender_block_ref", "") or "").strip()
+        ciphertext = str(envelope.get("ciphertext", "") or "")
+        if not msg_id or not mailbox_key or not sender_block_ref or not ciphertext:
+            return {"ok": False, "detail": "envelope missing required fields"}
+
+        with self._lock:
+            self._refresh_from_shared_relay()
+            self._cleanup_expired()
+
+            # Idempotent — if we already hold this exact msg_id, the
+            # replication round-tripped or a peer pushed the same
+            # envelope through multiple paths. Accept silently.
+            if any(m.msg_id == msg_id for m in self._mailboxes.get(mailbox_key, [])):
+                metrics_inc("dm_replica_duplicate")
+                return {"ok": True, "msg_id": msg_id, "duplicate": True}
+
+            # Same per-class cap as the deposit path — defense in depth
+            # against a peer that wraps a "deposit" as a "replica" to
+            # bypass the class limit.
+            delivery_class = str(envelope.get("delivery_class", "") or "")
+            if delivery_class in ("request", "shared", "self"):
+                class_limit = self._mailbox_limit_for_class(delivery_class)
+            else:
+                class_limit = self._shared_mailbox_limit()
+            if len(self._mailboxes.get(mailbox_key, [])) >= class_limit:
+                metrics_inc("dm_replica_drop_full")
+                return {"ok": False, "detail": "Recipient mailbox full"}
+
+            # THE network rule: per-(sender, recipient) anti-spam cap.
+            per_sender_limit = self._per_sender_pending_limit()
+            pending = self._per_sender_pending_count(
+                mailbox_key=mailbox_key,
+                sender_block_ref=sender_block_ref,
+            )
+            if pending >= per_sender_limit:
+                metrics_inc("dm_replica_drop_per_sender_cap")
+                # Returning a structured rejection — the sender's relay
+                # learns its envelope was rejected by an honest peer and
+                # can stop trying to push it.
+                return {
+                    "ok": False,
+                    "detail": (
+                        "Per-sender cap reached on this relay; refusing replica"
+                    ),
+                    "cap_violation": True,
+                    "pending": pending,
+                    "limit": per_sender_limit,
+                }
+
+            # Accept the replica into the local mailbox.
+            self._mailboxes[mailbox_key].append(
+                DMMessage(
+                    sender_id=str(envelope.get("sender_id", "") or ""),
+                    ciphertext=ciphertext,
+                    timestamp=float(envelope.get("timestamp", time.time()) or time.time()),
+                    msg_id=msg_id,
+                    delivery_class=str(envelope.get("delivery_class", "shared") or "shared"),
+                    sender_seal=str(envelope.get("sender_seal", "") or ""),
+                    relay_salt=str(envelope.get("relay_salt", "") or ""),
+                    sender_block_ref=sender_block_ref,
+                    payload_format=str(envelope.get("payload_format", "dm1") or "dm1"),
+                    session_welcome=str(envelope.get("session_welcome", "") or ""),
+                )
+            )
+            self._stats["messages_in_memory"] = sum(len(v) for v in self._mailboxes.values())
+            self._save()
+            metrics_inc("dm_replica_accepted")
+            return {"ok": True, "msg_id": msg_id}
+
+    def _replicate_envelope_to_peers_async(
+        self,
+        *,
+        envelope: dict[str, Any],
+    ) -> None:
+        """Push an outbound DM envelope to every authenticated relay peer.
+
+        Fire-and-forget: spawned in a background thread so ``deposit``
+        returns to the caller immediately. Per-peer errors are logged
+        and swallowed — the sender's UX must not block on slow Tor
+        peers, and a peer that's down today gets the next message
+        whenever it comes back. Inbound recipient polling from a healthy
+        peer keeps the system functional during peer failures.
+
+        Each peer is authed with the existing per-peer HMAC pattern
+        (#256) — same headers and key resolver gate-message replication
+        uses, so a hostile node that doesn't know any peer's HMAC key
+        can't impersonate a legitimate relay.
+        """
+        import threading
+
+        def _do_push():
+            try:
+                import hashlib
+                import hmac
+                import requests as _requests
+
+                from services.mesh.mesh_crypto import (
+                    normalize_peer_url,
+                    resolve_peer_key_for_url,
+                )
+                from services.mesh.mesh_router import (
+                    authenticated_push_peer_urls,
+                )
+
+                peers = authenticated_push_peer_urls()
+                if not peers:
+                    return
+
+                payload = json.dumps(
+                    {"envelope": envelope},
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+
+                timeout = max(
+                    1,
+                    int(getattr(self._settings(), "MESH_RELAY_PUSH_TIMEOUT_S", 10) or 10),
+                )
+
+                for peer_url in peers:
+                    try:
+                        normalized = normalize_peer_url(peer_url)
+                        headers = {"Content-Type": "application/json"}
+                        peer_key = resolve_peer_key_for_url(normalized)
+                        if peer_key:
+                            headers["X-Peer-Url"] = normalized
+                            headers["X-Peer-HMAC"] = hmac.new(
+                                peer_key, payload, hashlib.sha256
+                            ).hexdigest()
+                        url = f"{peer_url}/api/mesh/dm/replicate-envelope"
+                        resp = _requests.post(
+                            url, data=payload, timeout=timeout, headers=headers,
+                        )
+                        if resp.status_code == 200:
+                            metrics_inc("dm_replication_push_ok")
+                        else:
+                            # 4xx including the structured cap_violation
+                            # rejection from accept_replica — sender's
+                            # relay learns and stops retrying this msg_id.
+                            metrics_inc("dm_replication_push_rejected")
+                    except Exception:
+                        # Per-peer failure is non-fatal — log to metrics
+                        # but don't break the loop. Other peers and a
+                        # future retry can still propagate the envelope.
+                        metrics_inc("dm_replication_push_error")
+                        continue
+            except Exception:
+                # Outer guard — never let replication errors propagate
+                # back to the sender's deposit() caller.
+                metrics_inc("dm_replication_push_error")
+
+        thread = threading.Thread(
+            target=_do_push,
+            name="dm-replicate-push",
+            daemon=True,
+        )
+        thread.start()
+
+    def envelope_for_replication(
+        self,
+        *,
+        mailbox_key: str,
+        msg_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the wire-form envelope for a stored message, suitable
+        for POSTing to a peer relay's replicate-envelope endpoint.
+
+        Returns ``None`` if the message isn't in the mailbox (already
+        acked, expired, never existed). The caller holds the
+        responsibility for transport security (Tor SOCKS for .onion
+        peers, per-peer HMAC) and for not leaking the envelope to
+        clearnet peers when private transport is required.
+        """
+        with self._lock:
+            for m in self._mailboxes.get(mailbox_key, []):
+                if m.msg_id == msg_id:
+                    return {
+                        "msg_id": m.msg_id,
+                        "mailbox_key": mailbox_key,
+                        "sender_id": m.sender_id,
+                        "sender_block_ref": m.sender_block_ref,
+                        "sender_seal": m.sender_seal,
+                        "ciphertext": m.ciphertext,
+                        "timestamp": m.timestamp,
+                        "delivery_class": m.delivery_class,
+                        "relay_salt": m.relay_salt,
+                        "payload_format": m.payload_format,
+                        "session_welcome": m.session_welcome,
+                    }
+        return None
 
     def is_blocked(self, recipient_id: str, sender_id: str) -> bool:
         with self._lock:

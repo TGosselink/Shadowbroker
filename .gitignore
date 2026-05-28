@@ -91,6 +91,24 @@ backend/data/*
 !backend/data/power_plants.json
 !backend/data/tracked_names.json
 !backend/data/yacht_alert_db.json
+# Issue #206: bundled KiwiSDR receiver directory used as last-resort
+# fallback when rx.linkfanel.net (HTTP-only upstream) is unreachable
+# or returns content that fails our integrity validation.
+!backend/data/kiwisdr_directory.json
+# Issue #201: pinned SHA-256 digests for known Tor Expert Bundle URLs.
+# Used as a second verification source when upstream .sha256sum fails.
+!backend/data/tor_bundle_digests.json
+# Issue #258: SPKI pins for stream.aisstream.io so we can survive upstream
+# Let's Encrypt renewal failures without disabling TLS validation entirely.
+!backend/data/aisstream_spki_pins.json
+# Issue #231: pinned SHA-256 digests for known release archives. Used by
+# the self-updater as a second-line integrity check when the release's
+# SHA256SUMS.txt asset can't be fetched.
+!backend/data/release_digests.json
+# Issue #244/#245/#246: one-shot carrier-position seed shipped with each
+# release. Used ONLY on first-ever startup to bootstrap carrier_cache.json;
+# after that the cache reflects this install's own GDELT observations.
+!backend/data/carrier_seed.json
 
 # OS generated files
 .DS_Store
@@ -243,3 +261,32 @@ backend/data/wormhole_stdout.log
 
 # Compressed snapshot archives (can be 100 MB+)
 *.json.gz
+
+# ──────────────────────────────────────────────────────────────────────
+# AI assistant / coding-agent scratch
+# ──────────────────────────────────────────────────────────────────────
+# Per-tool config + scratch directories. These are private to whichever
+# coding agent the operator happens to be using and have no business in
+# the repo. If a tool's instructions need to be canonical for the project,
+# we'll put them in docs/ explicitly — not let the agent dump them at the
+# repo root.
+
+# OpenAI Codex CLI
+.codex/
+.codex-app-schema/
+.codex-app-ts/
+
+# Per-agent instruction files dropped at repo root by various tools.
+# These are operator-side preferences, not part of the project contract.
+AGENTS.md
+GEMINI.md
+CLAUDE.md
+.github/copilot-instructions.md
+
+# Stale AI-generated test file that referenced fields that don't exist in
+# the current `_parse_carrier_positions_from_news` implementation. Kept
+# ignored so it doesn't accidentally get committed if it shows up again
+# from a tool that's working off an out-of-date understanding of the
+# module. If a real test for that function is needed, write it under a
+# meaningful name in tests/test_carrier_tracker_quality.py.
+backend/tests/test_carrier_tracker_region_centers.py

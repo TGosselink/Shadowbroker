@@ -1,29 +1,22 @@
 /**
- * Sentinel Hub (Copernicus CDSE) — client-side token management & Process API tile fetcher.
+ * Sentinel Hub (Copernicus CDSE) — client-side token + Process API tile fetcher.
  *
- * Credentials are stored in browser-controlled storage only. In privacy/session
- * mode they stay session-scoped; otherwise they persist in local storage. Token
- * exchange is proxied through the ShadowBroker backend (/api/sentinel/token) to
- * avoid CORS blocks from the Copernicus identity provider. Credentials are
- * forwarded, never stored server-side.
+ * Issue #298 (tg12): Credentials are now stored server-side in the backend
+ * ``.env`` (managed through the existing ``/api/settings/api-keys`` flow,
+ * same as every other third-party API key). The browser no longer holds
+ * ``client_id`` / ``client_secret`` in localStorage or sessionStorage and
+ * no longer forwards them in proxy requests.
  *
- * Uses the Process API with inline evalscripts — no Instance ID / Configuration needed.
+ * Old browser-storage keys (``sb_sentinel_client_id`` / ``sb_sentinel_client_secret``
+ * / ``sb_sentinel_instance_id``) are migrated out by ``SettingsPanel`` on
+ * first mount after the upgrade — see ``migrateLegacySentinelBrowserKeys()``
+ * exported below.
  */
 
 import { API_BASE } from '@/lib/api';
-import {
-  getSensitiveBrowserItem,
-  getSensitiveBrowserStorageMode,
-  removeSensitiveBrowserItem,
-  setSensitiveBrowserItem,
-} from '@/lib/privacyBrowserStorage';
 
-// Token exchange proxied through our backend (Copernicus blocks browser CORS)
+// Token exchange proxied through our backend (Copernicus blocks browser CORS).
 const TOKEN_PROXY_URL = `${API_BASE}/api/sentinel/token`;
-
-// browser-storage keys
-const LS_CLIENT_ID = 'sb_sentinel_client_id';
-const LS_CLIENT_SECRET = 'sb_sentinel_client_secret';
 
 // In-memory token cache (never persisted)
 let cachedToken: string | null = null;
@@ -31,47 +24,114 @@ let tokenExpiry = 0;
 // Dedup: only one in-flight token request at a time
 let _tokenPromise: Promise<string | null> | null = null;
 
-// ─── Credential helpers ────────────────────────────────────────────────────
+// In-memory cache of "does the backend have Sentinel credentials configured?"
+// so the rest of the UI can short-circuit tile load attempts without a server
+// round-trip per tile. Refreshed by callers via `refreshSentinelStatus()`.
+let _backendCredentialsConfigured: boolean | null = null;
+let _backendStatusPromise: Promise<boolean> | null = null;
 
-export function getSentinelCredentials(): {
-  clientId: string;
-  clientSecret: string;
-} {
-  if (typeof window === 'undefined') return { clientId: '', clientSecret: '' };
-  return {
-    clientId: getSensitiveBrowserItem(LS_CLIENT_ID) || '',
-    clientSecret: getSensitiveBrowserItem(LS_CLIENT_SECRET) || '',
-  };
+// ─── Credential status (server-side) ───────────────────────────────────────
+
+/**
+ * Ask the backend whether Sentinel credentials are configured in ``.env``.
+ * Caches the result in memory; call ``refreshSentinelStatus()`` after the
+ * operator saves new API keys in the settings panel.
+ *
+ * Returns ``false`` on network errors so the UI fails safely (no broken
+ * tile requests). Never returns the secret itself — that stays server-side.
+ */
+export async function checkBackendSentinelStatus(): Promise<boolean> {
+  if (_backendCredentialsConfigured !== null) return _backendCredentialsConfigured;
+  if (_backendStatusPromise) return _backendStatusPromise;
+
+  _backendStatusPromise = (async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/api/settings/api-keys`, {
+        headers: { Accept: 'application/json' },
+      });
+      if (!resp.ok) return false;
+      const list = await resp.json();
+      // /api/settings/api-keys returns an array of { id, env_key, is_set, ... }
+      const ids = new Set(['sentinel_client_id', 'sentinel_client_secret']);
+      const configured = Array.isArray(list)
+        && list.filter((row: { id?: string; is_set?: boolean }) =>
+              row && row.id && ids.has(row.id) && row.is_set === true,
+           ).length === 2;
+      _backendCredentialsConfigured = configured;
+      return configured;
+    } catch {
+      _backendCredentialsConfigured = false;
+      return false;
+    } finally {
+      _backendStatusPromise = null;
+    }
+  })();
+
+  return _backendStatusPromise;
 }
 
-export function setSentinelCredentials(clientId: string, clientSecret: string): void {
-  setSensitiveBrowserItem(LS_CLIENT_ID, clientId);
-  setSensitiveBrowserItem(LS_CLIENT_SECRET, clientSecret);
-  // Invalidate cached token when credentials change
+/** Invalidate the cached status — call this after the API Keys panel saves. */
+export function refreshSentinelStatus(): void {
+  _backendCredentialsConfigured = null;
+  // Drop any cached token too — credentials may have changed.
   cachedToken = null;
   tokenExpiry = 0;
 }
 
-export function clearSentinelCredentials(): void {
-  removeSensitiveBrowserItem(LS_CLIENT_ID);
-  removeSensitiveBrowserItem(LS_CLIENT_SECRET);
-  // Also remove legacy instance ID if present
-  removeSensitiveBrowserItem('sb_sentinel_instance_id');
-  if (typeof window !== 'undefined') {
-    localStorage.removeItem('sb_sentinel_instance_id');
-    sessionStorage.removeItem('sb_sentinel_instance_id');
-  }
-  cachedToken = null;
-  tokenExpiry = 0;
+/**
+ * Synchronous getter — returns the last known status without a network call.
+ * Returns ``null`` until ``checkBackendSentinelStatus()`` has run at least once.
+ */
+export function getCachedSentinelStatus(): boolean | null {
+  return _backendCredentialsConfigured;
 }
 
-export function getSentinelCredentialStorageMode(): 'local' | 'session' {
-  return getSensitiveBrowserStorageMode();
-}
-
+/**
+ * Back-compat shim. Pre-#298 callers asked ``hasSentinelCredentials()`` to
+ * decide whether to render the Sentinel layer / open the API key prompt.
+ * The credential now lives server-side, so this is just the cached
+ * server-status check. Returns ``false`` until the first
+ * ``checkBackendSentinelStatus()`` resolves (callers should kick that off
+ * once at app startup — see ``page.tsx`` mount effect).
+ */
 export function hasSentinelCredentials(): boolean {
-  const { clientId, clientSecret } = getSentinelCredentials();
-  return Boolean(clientId && clientSecret);
+  return _backendCredentialsConfigured === true;
+}
+
+/**
+ * One-time migration helper: clear the legacy browser-storage keys that
+ * pre-#298 versions used to persist Sentinel credentials. Idempotent and
+ * safe to call on every page load — does nothing if no keys are present.
+ *
+ * Called by ``SettingsPanel`` on mount. We do NOT auto-POST the legacy
+ * browser values to the backend, because doing so would silently migrate
+ * a secret across a trust boundary without operator consent. Operators
+ * who relied on browser-stored credentials will re-enter them once in
+ * the API Keys panel, and the legacy keys get wiped here.
+ */
+export function migrateLegacySentinelBrowserKeys(): { cleared: string[] } {
+  if (typeof window === 'undefined') return { cleared: [] };
+  const legacy = [
+    'sb_sentinel_client_id',
+    'sb_sentinel_client_secret',
+    'sb_sentinel_instance_id',
+  ];
+  const cleared: string[] = [];
+  for (const key of legacy) {
+    try {
+      if (window.localStorage?.getItem(key) !== null) {
+        window.localStorage.removeItem(key);
+        cleared.push(key);
+      }
+    } catch { /* ignore quota / privacy mode errors */ }
+    try {
+      if (window.sessionStorage?.getItem(key) !== null) {
+        window.sessionStorage.removeItem(key);
+        if (!cleared.includes(key)) cleared.push(key);
+      }
+    } catch { /* ignore */ }
+  }
+  return { cleared };
 }
 
 // ─── OAuth2 token ──────────────────────────────────────────────────────────
@@ -79,13 +139,15 @@ export function hasSentinelCredentials(): boolean {
 /**
  * Fetch an OAuth2 access token using the client_credentials grant.
  * Caches in memory; auto-refreshes 30 s before expiry.
+ *
+ * The request body NO LONGER carries client_id/secret — the backend
+ * resolves credentials from its ``.env`` via the API Keys flow. The
+ * server-side proxy still accepts body credentials for legacy callers,
+ * but the dashboard does not supply them.
  */
 export function getSentinelToken(): Promise<string | null> {
   // Return cached token if still valid (with 30 s margin)
   if (cachedToken && Date.now() < tokenExpiry - 30_000) return Promise.resolve(cachedToken);
-
-  const { clientId, clientSecret } = getSentinelCredentials();
-  if (!clientId || !clientSecret) return Promise.resolve(null);
 
   // Dedup: reuse in-flight request so 20 tiles don't each trigger a token fetch
   if (_tokenPromise) return _tokenPromise;
@@ -94,11 +156,9 @@ export function getSentinelToken(): Promise<string | null> {
     try {
       const resp = await fetch(TOKEN_PROXY_URL, {
         method: 'POST',
+        // Backend resolves credentials from env. Empty body = "use server-side".
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: clientId,
-          client_secret: clientSecret,
-        }),
+        body: new URLSearchParams({}),
       });
 
       if (!resp.ok) {
@@ -131,6 +191,8 @@ const TILE_PROXY_URL = `${API_BASE}/api/sentinel/tile`;
 /**
  * Fetch a single 256×256 tile via backend proxy to Sentinel Hub Process API.
  * Returns a PNG ArrayBuffer or null on failure.
+ *
+ * Body no longer carries client_id/secret — the backend uses .env values.
  */
 export async function fetchSentinelTile(
   z: number,
@@ -139,21 +201,10 @@ export async function fetchSentinelTile(
   preset: string,
   date: string,
 ): Promise<ArrayBuffer | null> {
-  const { clientId, clientSecret } = getSentinelCredentials();
-  if (!clientId || !clientSecret) return null;
-
   const resp = await fetch(TILE_PROXY_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_id: clientId,
-      client_secret: clientSecret,
-      preset,
-      date,
-      z,
-      x,
-      y,
-    }),
+    body: JSON.stringify({ preset, date, z, x, y }),
   });
 
   if (!resp.ok) return null;

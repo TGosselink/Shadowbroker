@@ -130,6 +130,45 @@ function stageBackendRuntime() {
   });
   stagePrivacyCoreArtifact();
   stageReleaseAttestation();
+  stageStartScripts();
+}
+
+/**
+ * Copy ``start.bat`` and ``start.sh`` from the repo root into the
+ * staged backend-runtime/ so they sit next to ``privacy_core.dll``.
+ *
+ * Why: an MSI/EXE/AppImage user who wants to launch via the dev-style
+ * scripts (because the desktop shell is failing, or they prefer the
+ * browser frontend at localhost:3000) shouldn't have to clone the
+ * source repo just to get the scripts. Having them inside the install
+ * directory also means the bundled ``privacy_core.dll`` fallback in
+ * those scripts resolves to the SAME directory as the script, which
+ * is exactly the layout the v0.9.81 script update is looking for.
+ *
+ * Tracked from issue #319: users who fell back to start.bat from
+ * their MSI install dir had to go fetch it from GitHub, then saw a
+ * scary "install Rust" warning because the script didn't know where
+ * the bundled DLL was. Bundling the script removes both problems.
+ */
+function stageStartScripts() {
+  const scripts = ['start.bat', 'start.sh'];
+  for (const name of scripts) {
+    const src = path.join(repoRoot, name);
+    if (!fs.existsSync(src)) {
+      console.warn(`backend-runtime staged without ${name} (not at repo root)`);
+      continue;
+    }
+    const dst = path.join(outputDir, name);
+    fs.copyFileSync(src, dst);
+    // Preserve executable bit on POSIX systems for the .sh script.
+    if (name.endsWith('.sh') && process.platform !== 'win32') {
+      try {
+        fs.chmodSync(dst, 0o755);
+      } catch {
+        /* best-effort; not fatal on filesystems that don't honor chmod */
+      }
+    }
+  }
 }
 
 function stagePrivacyCoreArtifact() {

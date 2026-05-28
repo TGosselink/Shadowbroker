@@ -39,6 +39,7 @@ import { useFeedHealth } from '@/hooks/useFeedHealth';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import KeyboardShortcutsOverlay from '@/components/KeyboardShortcutsOverlay';
 import AlertToast from '@/components/AlertToast';
+import AisUpstreamBanner from '@/components/AisUpstreamBanner';
 import { useAlertToasts } from '@/hooks/useAlertToasts';
 import { useWatchlist } from '@/hooks/useWatchlist';
 import WatchlistWidget from '@/components/WatchlistWidget';
@@ -50,6 +51,7 @@ import {
   hasSentinelInfoBeenSeen,
   markSentinelInfoSeen,
   hasSentinelCredentials,
+  checkBackendSentinelStatus,
 } from '@/lib/sentinelHub';
 import { useTranslation } from '@/i18n';
 import { LocateBar } from './LocateBar';
@@ -107,6 +109,15 @@ export default function Dashboard() {
   useEffect(() => {
     localStorage.setItem('sb_ticker_open', tickerOpen.toString());
   }, [tickerOpen]);
+
+  // Issue #298: kick the one-time backend Sentinel-status check on mount.
+  // This populates the cached value that ``hasSentinelCredentials()`` reads
+  // synchronously elsewhere (MaplibreViewer's tile-URL memo, the
+  // Sentinel-info modal flow). Fire-and-forget — the cache stays false
+  // until resolved so the UI fails safely.
+  useEffect(() => {
+    void checkBackendSentinelStatus();
+  }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -922,6 +933,11 @@ export default function Dashboard() {
           onDismiss={dismissToast}
           onFlyTo={handleFlyTo}
         />
+
+        {/* AIS UPSTREAM OUTAGE BANNER — renders only when AIS is configured
+            but the WebSocket upstream is unreachable. Tells users the empty
+            ocean isn't their fault. */}
+        <AisUpstreamBanner />
 
         {/* ONBOARDING MODAL */}
         {showOnboarding && (

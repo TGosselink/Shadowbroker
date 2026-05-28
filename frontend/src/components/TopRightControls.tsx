@@ -91,7 +91,19 @@ export default function TopRightControls({
   const [manualUpdateUrl, setManualUpdateUrl] = useState(DEFAULT_RELEASES_URL);
   const [releasePageUrl, setReleasePageUrl] = useState(DEFAULT_RELEASES_URL);
   const [dockerCommands, setDockerCommands] = useState('');
-  const [updateAction, setUpdateAction] = useState<UpdateActionKind>('auto_apply');
+  // Pre-detection initial value: the right action depends on the runtime.
+  // For desktop installs (Tauri webview), the default should be
+  // ``manual_download`` so that clicking Update before the async runtime
+  // probe completes opens the release page in a browser instead of POSTing
+  // to /api/system/update — which throws ``admin_session_required`` on
+  // fresh sessions and confused v0.9.79/v0.9.8 users with a cryptic error.
+  // ``window.__TAURI__`` is injected synchronously by Tauri before React
+  // mounts, so this check is safe to do at useState init time.
+  const initialUpdateAction: UpdateActionKind =
+    typeof window !== 'undefined' && (window as { __TAURI__?: unknown }).__TAURI__
+      ? 'manual_download'
+      : 'auto_apply';
+  const [updateAction, setUpdateAction] = useState<UpdateActionKind>(initialUpdateAction);
   const [updateDetail, setUpdateDetail] = useState(AUTO_UPDATE_DETAIL);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -859,7 +871,7 @@ export default function TopRightControls({
                         }>
                           {activatingPhase === 'done'
                             ? (syncOutcomeRaw === 'solo'
-                              ? `${t('node.soloReady')} — ${nodeStatus?.total_events ?? 0} ${t('node.events')}`
+                              ? `${t('node.soloNodeReady')} — ${nodeStatus?.total_events ?? 0} ${t('node.events')}`
                               : `${t('node.synced')} — ${nodeStatus?.total_events ?? 0} ${t('node.events')}`)
                             : activatingPhase === 'sync'
                               ? `${t('node.syncingChain')}${(nodeStatus?.total_events ?? 0) > 0 ? ` ${nodeStatus?.total_events} ${t('node.events')}` : ''}`
@@ -1013,8 +1025,8 @@ export default function TopRightControls({
                     : t('terminal.terminalDetail')}
                   <div className="mt-2 text-[12px] text-cyan-200/70 normal-case tracking-normal">
                     {terminalPrivateReady
-                      ? t('terminal.enterTerminalDetail')
-                      : t('terminal.terminalDetailMore')}
+                      ? t('terminal.identityReady')
+                      : t('terminal.identityNotReady')}
                   </div>
                 </div>
                 {terminalLaunchError && (
@@ -1025,15 +1037,15 @@ export default function TopRightControls({
                 <div className="border border-cyan-500/20 bg-black/30 px-4 py-4 text-[12px] font-mono text-slate-200 leading-[1.85]">
                   <div className="text-cyan-300 tracking-[0.18em]">{t('terminal.beforeYouEnter')}</div>
                   <ul className="mt-3 space-y-2 list-disc pl-5">
-                    <li>{t('terminal.term1')}</li>
-                    <li>{t('terminal.term2')}</li>
-                    <li>{t('terminal.term3')}</li>
+                    <li>{t('terminal.termTerminal1')}</li>
+                    <li>{t('terminal.termTerminal2')}</li>
+                    <li>{t('terminal.termTerminal3')}</li>
                   </ul>
                 </div>
                 <div className="border border-amber-500/20 bg-amber-950/10 px-4 py-3 text-[12px] font-mono text-amber-200/80 leading-[1.85]">
                   <div className="text-amber-300 tracking-[0.18em]">{t('terminal.wormholeCleanup')}</div>
                   <div className="mt-2">
-                    {t('terminal.wormholeCleanupDetail')}
+                    {t('terminal.cleanupDetail')}
                   </div>
                 </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
