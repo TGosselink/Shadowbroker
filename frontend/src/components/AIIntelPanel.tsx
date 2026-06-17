@@ -632,9 +632,17 @@ function ConnectModalBody({ apiEndpoint, handleCopy, copied }: ConnectModalBodyP
   const buildSnippet = (key: string) => {
     const lines: string[] = [];
     if (resolvedUrl) lines.push(`SHADOWBROKER_URL=${resolvedUrl}`);
-    lines.push(`SHADOWBROKER_KEY=${key}`);
+    lines.push(`SHADOWBROKER_HMAC_SECRET=${key}`);
     lines.push(`SHADOWBROKER_ACCESS=${accessTier}`);
     if (connectionMode === 'remote' && nodeId) lines.push(`SHADOWBROKER_NODE_ID=${nodeId}`);
+    lines.push('');
+    lines.push('# AUTH DIRECTIVE:');
+    lines.push('# SHADOWBROKER_HMAC_SECRET is a shared HMAC signing secret, not a raw API key.');
+    lines.push('# Never send it as X-Admin-Key, Authorization: Bearer, a query parameter, or a plain request header.');
+    lines.push('# Every direct ShadowBroker API request must be HMAC-SHA256 signed with:');
+    lines.push('#   X-SB-Timestamp, X-SB-Nonce, X-SB-Signature');
+    lines.push('# Signature input: METHOD|path|timestamp|nonce|sha256(body)');
+    lines.push('# Use the ShadowBrokerClient/openclaw skill helper so requests are signed automatically.');
     lines.push('');
     lines.push('# OPERATING DIRECTIVE:');
     lines.push('# You are a remote OpenClaw agent connected to ShadowBroker.');

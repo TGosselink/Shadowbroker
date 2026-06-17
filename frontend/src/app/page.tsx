@@ -18,9 +18,12 @@ import ScaleBar from '@/components/ScaleBar';
 import MeshTerminal from '@/components/MeshTerminal';
 import MeshChat from '@/components/MeshChat';
 import InfonetTerminal from '@/components/InfonetTerminal';
-import { leaveWormhole, fetchWormholeState } from '@/mesh/wormholeClient';
-import { teardownWormholeOnClose } from '@/lib/wormholeTeardown';
+import { endInfonetTerminalSession } from '@/lib/infonetTerminalSession';
 import ShodanPanel from '@/components/ShodanPanel';
+import ReconPanel from '@/components/ReconPanel';
+import ScmPanel from '@/components/ScmPanel';
+import EntityGraphPanel from '@/components/EntityGraphPanel';
+import { isEntityGraphEligible } from '@/lib/entityGraph';
 import AIIntelPanel from '@/components/AIIntelPanel';
 import GlobalTicker from '@/components/GlobalTicker';
 import ErrorBoundary from '@/components/ErrorBoundary';
@@ -34,6 +37,7 @@ import { useDataPolling, LAYER_TOGGLE_EVENT } from '@/hooks/useDataPolling';
 import { useBackendStatus, useDataKey, useDataKeys } from '@/hooks/useDataStore';
 import { useReverseGeocode } from '@/hooks/useReverseGeocode';
 import { useRegionDossier } from '@/hooks/useRegionDossier';
+import { useGtDossier } from '@/hooks/useGtDossier';
 import { useAgentActions } from '@/hooks/useAgentActions';
 import { useFeedHealth } from '@/hooks/useFeedHealth';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
@@ -71,6 +75,10 @@ export default function Dashboard() {
   useDataPolling();
   const { mouseCoords, locationLabel, handleMouseCoords } = useReverseGeocode();
   const [selectedEntity, setSelectedEntity] = useState<SelectedEntity | null>(null);
+  const [showEntityGraph, setShowEntityGraph] = useState(false);
+  useEffect(() => {
+    setShowEntityGraph(false);
+  }, [selectedEntity]);
   const [trackedSdr, setTrackedSdr] = useState<KiwiSDR | null>(null);
   const [trackedScanner, setTrackedScanner] = useState<Scanner | null>(null);
   const { regionDossier, regionDossierLoading, handleMapRightClick } = useRegionDossier(
@@ -161,7 +169,13 @@ export default function Dashboard() {
   useEffect(() => subscribeMeshTerminalOpen(openInfonet), [openInfonet]);
 
   const toggleInfonet = useCallback(() => {
-    setInfonetOpen(prev => !prev);
+    setInfonetOpen((prev) => {
+      if (prev) {
+        void endInfonetTerminalSession();
+        return false;
+      }
+      return true;
+    });
   }, []);
 
   const [activeLayers, setActiveLayers] = useState<ActiveLayers>({
@@ -185,6 +199,12 @@ export default function Dashboard() {
     highres_satellite: false,
     sentinel_hub: false,
     viirs_nightlights: false,
+    road_corridor_trends: false,
+    malware_c2: false,
+    submarine_cables: false,
+    scm_suppliers: false,
+    cyber_threats: false,
+    telegram_osint: true,
     // Hazards — no fire, rest ON
     earthquakes: true,
     firms: false,
@@ -218,6 +238,7 @@ export default function Dashboard() {
     wastewater: true,
     // CrowdThreat is operator opt-in only.
     crowdthreat: false,
+    gt_risk: false,
     // Shodan
     shodan_overlay: false,
     // AI Intel
@@ -225,6 +246,16 @@ export default function Dashboard() {
     // SAR (Synthetic Aperture Radar)
     sar: true,
   });
+  const regionLat =
+    selectedEntity?.type === 'region_dossier' ? selectedEntity.extra?.lat : undefined;
+  const regionLng =
+    selectedEntity?.type === 'region_dossier' ? selectedEntity.extra?.lng : undefined;
+  const { gtDossier, gtDossierLoading } = useGtDossier(
+    typeof regionLat === 'number' ? regionLat : undefined,
+    typeof regionLng === 'number' ? regionLng : undefined,
+    regionDossier?.country?.name,
+    activeLayers.gt_risk,
+  );
   const [shodanResults, setShodanResults] = useState<ShodanSearchMatch[]>([]);
   const [, setShodanQueryLabel] = useState('');
   const [shodanStyle, setShodanStyle] = useState<import('@/types/shodan').ShodanStyleConfig>({ shape: 'circle', color: '#16a34a', size: 'md' });
@@ -446,6 +477,7 @@ export default function Dashboard() {
       highres_satellite: false,
       sentinel_hub: false,
       viirs_nightlights: false,
+      road_corridor_trends: false,
       psk_reporter: false,
       tinygs: false,
       datacenters: false,
@@ -589,6 +621,7 @@ export default function Dashboard() {
                       setTrackedScanner={setTrackedScanner}
                       isMinimized={leftDataMinimized}
                       onMinimizedChange={setLeftDataMinimized}
+                      viewBoundsRef={viewBoundsRef}
                     />
                   </ErrorBoundary>
                 ) : (
@@ -599,7 +632,7 @@ export default function Dashboard() {
                 )}
               </div>
 
-              {/* 2. MESH CHAT (Middle) */}
+              {/* 2. MESHTASTIC CHAT (Middle) */}
               {secondaryBootReady && (
                 <div className="contents" style={{ direction: 'ltr' }}>
                   <MeshChat
@@ -608,6 +641,8 @@ export default function Dashboard() {
                     onExpandedChange={setLeftMeshExpanded}
                     onSettingsClick={() => setSettingsOpen(true)}
                     onTerminalToggle={openSecureTerminalLauncher}
+                    onOpenLiveGate={openLiveGateFromShell}
+                    onOpenDeadDrop={openDeadDropFromShell}
                     launchRequest={meshChatLaunchRequest}
                   />
                 </div>
@@ -633,7 +668,15 @@ export default function Dashboard() {
                 </div>
               )}
 
-              {/* 4. AI INTEL (Below Shodan) */}
+              {/* 4. RECON + SCM */}
+              {secondaryBootReady && (
+                <div className="contents" style={{ direction: 'ltr' }}>
+                  <ReconPanel />
+                  <ScmPanel layerEnabled={activeLayers.scm_suppliers} />
+                </div>
+              )}
+
+              {/* 5. AI INTEL */}
               {secondaryBootReady && (
                 <div className="contents" style={{ direction: 'ltr' }}>
                   <AIIntelPanel
@@ -745,6 +788,11 @@ export default function Dashboard() {
                     selectedEntity={selectedEntity}
                     regionDossier={regionDossier}
                     regionDossierLoading={regionDossierLoading}
+                    gtDossier={gtDossier}
+                    gtDossierLoading={gtDossierLoading}
+                    onExpandEntityGraph={() => {
+                      if (isEntityGraphEligible(selectedEntity)) setShowEntityGraph(true);
+                    }}
                     onArticleClick={(idx, lat, lng, title) => {
                       if (lat !== undefined && lng !== undefined) {
                         setFlyToLocation({ lat, lng, ts: Date.now() });
@@ -986,13 +1034,16 @@ export default function Dashboard() {
           onSettingsClick={() => setSettingsOpen(true)}
         />
 
+        {showEntityGraph && selectedEntity && isEntityGraphEligible(selectedEntity) && (
+          <EntityGraphPanel entity={selectedEntity} onClose={() => setShowEntityGraph(false)} />
+        )}
+
         {/* INFONET TERMINAL */}
         <InfonetTerminal
           isOpen={infonetOpen}
           onClose={() => {
             setInfonetOpen(false);
-            // Shut down Wormhole when the terminal closes so it doesn't stay running
-            void teardownWormholeOnClose(fetchWormholeState, leaveWormhole);
+            void endInfonetTerminalSession();
           }}
           onOpenLiveGate={openLiveGateFromShell}
           onOpenDeadDrop={openDeadDropFromShell}

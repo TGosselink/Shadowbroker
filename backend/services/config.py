@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     MESH_MQTT_INCLUDE_DEFAULT_ROOTS: bool = True
     MESH_RNS_ENABLED: bool = False
     MESH_ARTI_ENABLED: bool = False
+    # When true, trust wormhole_status.json ready bit if the child process is
+    # alive — avoids transport-tier flapping when /api/health probes time out
+    # under Tor load (common during live DM E2E).
+    MESH_WORMHOLE_TRUST_FILE_READY: bool = False
     MESH_ARTI_SOCKS_PORT: int = 9050
     MESH_RELAY_PEERS: str = ""
     MESH_PUBLIC_PEER_URL: str = ""
@@ -43,7 +47,24 @@ class Settings(BaseSettings):
     MESH_INFONET_ALLOW_CLEARNET_SYNC: bool = False
     MESH_BOOTSTRAP_DISABLED: bool = False
     MESH_BOOTSTRAP_MANIFEST_PATH: str = "data/bootstrap_peers.json"
-    MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY: str = ""
+    # Public sb-testnet-0 fleet signer (participants). Seed operator holds the private key.
+    MESH_BOOTSTRAP_SIGNER_PUBLIC_KEY: str = (
+        "ul1d0kj/ODPIp0OhHzX8eLAVXzJ3CVvzW1vn2IC6q3I="
+    )
+    MESH_BOOTSTRAP_SIGNER_PRIVATE_KEY: str = ""
+    # When true, empty MESH_PEER_PUSH_SECRET uses the public fleet HMAC for seed join/announce.
+    MESH_INFONET_FLEET_JOIN: bool = True
+    MESH_INFONET_FLEET_JOIN_DISABLED: bool = False
+    # Headless relay/seed compose: auto-enable Tor wormhole on startup so
+    # docker compose redeploys keep the fleet onion reachable.
+    MESH_INFONET_RELAY_AUTO_WORMHOLE: bool = False
+    MESH_INFONET_RELAY_AUTO_WORMHOLE_DISABLED: bool = False
+    MESH_BOOTSTRAP_SIGNER_ID: str = ""
+    MESH_PEER_REGISTRY_ENABLED: bool = False
+    MESH_PEER_REGISTRY_DISABLED: bool = False
+    MESH_PEER_REGISTRY_STALE_S: int = 604800
+    MESH_SWARM_MANIFEST_TTL_S: int = 14400
+    MESH_SWARM_MANIFEST_PULL_INTERVAL_S: int = 300
     MESH_NODE_MODE: str = "participant"
     MESH_SYNC_INTERVAL_S: int = 300
     MESH_SYNC_FAILURE_BACKOFF_S: int = 60

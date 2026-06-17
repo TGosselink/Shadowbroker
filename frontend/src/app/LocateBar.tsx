@@ -12,6 +12,7 @@ export function LocateBar({ onLocate, onOpenChange }: { onLocate: (lat: number, 
   const [value, setValue] = useState('');
   const [results, setResults] = useState<{ label: string; lat: number; lng: number }[]>([]);
   const [loading, setLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
@@ -58,14 +59,15 @@ export function LocateBar({ onLocate, onOpenChange }: { onLocate: (lat: number, 
     if (searchAbortRef.current) searchAbortRef.current.abort();
     if (q.trim().length < 2) {
       setResults([]);
+      setSearchError(null);
       return;
     }
     timerRef.current = setTimeout(async () => {
       setLoading(true);
+      setSearchError(null);
       searchAbortRef.current = new AbortController();
       const signal = searchAbortRef.current.signal;
       try {
-        // Try backend proxy first (has caching + rate-limit compliance)
         const res = await fetch(
           `${API_BASE}/api/geocode/search?q=${encodeURIComponent(q)}&limit=5`,
           { signal },
@@ -80,43 +82,19 @@ export function LocateBar({ onLocate, onOpenChange }: { onLocate: (lat: number, 
             }),
           );
           setResults(mapped);
+          if (mapped.length === 0) {
+            setSearchError('No places found');
+          }
         } else {
-          // Backend proxy returned an error — fall back to direct Nominatim
-          console.warn(`[Locate] Proxy returned HTTP ${res.status}, falling back to Nominatim`);
-          const directRes = await fetch(
-            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=5`,
-            { headers: { 'Accept-Language': 'en' }, signal },
-          );
-          const data = await directRes.json();
-          setResults(
-            data.map((r: { display_name: string; lat: string; lon: string }) => ({
-              label: r.display_name,
-              lat: parseFloat(r.lat),
-              lng: parseFloat(r.lon),
-            })),
-          );
+          console.warn(`[Locate] Geocode proxy HTTP ${res.status}`);
+          setResults([]);
+          setSearchError('Place search unavailable — check backend connection');
         }
       } catch (err) {
         if ((err as Error)?.name !== 'AbortError') {
-          // Proxy completely failed — try direct Nominatim as last resort
-          try {
-            const directRes = await fetch(
-              `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=5`,
-              { headers: { 'Accept-Language': 'en' } },
-            );
-            const data = await directRes.json();
-            setResults(
-              data.map((r: { display_name: string; lat: string; lon: string }) => ({
-                label: r.display_name,
-                lat: parseFloat(r.lat),
-                lng: parseFloat(r.lon),
-              })),
-            );
-          } catch {
-            setResults([]);
-          }
-        } else {
+          console.warn('[Locate] Geocode proxy failed:', err);
           setResults([]);
+          setSearchError('Place search unavailable — check backend connection');
         }
       } finally {
         setLoading(false);
@@ -216,6 +194,11 @@ export function LocateBar({ onLocate, onOpenChange }: { onLocate: (lat: number, 
           </svg>
         </button>
       </div>
+      {searchError && results.length === 0 && !loading && value.trim().length >= 2 && (
+        <div className="absolute bottom-full left-0 right-0 mb-1 bg-[var(--bg-secondary)] border border-amber-800/50 px-3 py-2 text-[10px] font-mono text-amber-200/90">
+          {searchError}
+        </div>
+      )}
       {results.length > 0 && (
         <div className="absolute bottom-full left-0 right-0 mb-1 bg-[var(--bg-secondary)] border border-[var(--border-primary)] overflow-hidden shadow-[0_-8px_30px_rgba(0,0,0,0.4)] max-h-[200px] overflow-y-auto styled-scrollbar">
           {results.map((r, i) => (

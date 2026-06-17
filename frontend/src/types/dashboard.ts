@@ -921,6 +921,271 @@ export interface DashboardData {
   sar_anomalies?: SarAnomaly[];
   sar_aoi_coverage?: SarAoiCoverage[];
   sar_aois?: SarAoi[];
+
+  road_corridor_trends?: {
+    updated_at?: string | null;
+    corridors?: Array<{
+      preset_id: string;
+      label: string;
+      status: string;
+      total_detections?: number;
+      daily_counts?: Array<{ date: string; count: number }>;
+      updated_at?: string;
+      error?: string | null;
+    }>;
+  };
+
+  malware_threats?: {
+    threats?: MalwareThreat[];
+    total?: number;
+    timestamp?: string | null;
+    source?: string;
+  };
+  cyber_threats?: {
+    threats?: Array<{
+      id: string;
+      name: string;
+      vendor?: string;
+      product?: string;
+      severity?: string;
+      date?: string;
+      source?: string;
+    }>;
+    stats?: Record<string, unknown>;
+  };
+  scm_suppliers?: {
+    suppliers?: ScmSupplier[];
+    critical_count?: number;
+    total?: number;
+    timestamp?: string;
+  };
+  telegram_osint?: {
+    posts?: TelegramOsintPost[];
+    total?: number;
+    geolocated?: number;
+    timestamp?: string | null;
+    channels?: string[];
+  };
+  gt_risk?: GTRiskPayload;
+}
+
+export interface GTRiskHeatmapFeature {
+  type: 'Feature';
+  properties: {
+    region: string;
+    risk: number;
+    financial?: number;
+    unrest?: number;
+    conflict?: number;
+    contagion?: number;
+    updates?: number;
+    risk_spot?: number;
+    risk_3d_avg?: number;
+    risk_delta?: number;
+    micro_ignition?: boolean;
+  };
+  geometry: {
+    type: 'Point';
+    coordinates: [number, number];
+  };
+}
+
+export interface GTRiskPayload {
+  enabled?: boolean;
+  timestamp?: string | null;
+  processed?: number;
+  meta?: {
+    tracked_regions?: number;
+    engine_regions?: number;
+    plotted_regions?: number;
+    max_regions?: number;
+  };
+  heatmap?: {
+    type: 'FeatureCollection';
+    features: GTRiskHeatmapFeature[];
+  };
+  clusters?: Array<{
+    cluster_id: number;
+    size: number;
+    mean_risk: number;
+    regions?: string[];
+    members?: string[];
+  }>;
+}
+
+export interface GtDossierSignalEntry {
+  timestamp: string;
+  domain: string;
+  signals: Record<string, number>;
+  strength: number;
+  posterior: number;
+  source: string;
+  deviation_score?: number;
+}
+
+export interface GtBacktestCaseResult {
+  case_id: string;
+  name: string;
+  kind: string;
+  correct: boolean;
+  alerted: boolean;
+  peak_domain_risk: number;
+  peak_composite_risk: number;
+  costly_signals: string[];
+}
+
+export interface GtBacktestReport {
+  enabled?: boolean;
+  total_cases: number;
+  correct: number;
+  accuracy: number;
+  confidence_rate: number;
+  wilson_lower_95: number;
+  wilson_upper_95: number;
+  true_positives: number;
+  true_negatives: number;
+  false_positives: number;
+  false_negatives: number;
+  sensitivity: number;
+  specificity: number;
+  alert_threshold: number;
+  target_confidence: number;
+  meets_target: boolean;
+  expanded_suite?: boolean;
+  tuned?: boolean;
+  recommended_alert_threshold?: number;
+  cases?: GtBacktestCaseResult[];
+}
+
+export interface GtRollingWeekScore {
+  week_id: string;
+  frozen_at?: string;
+  alert_threshold: number;
+  total_regions: number;
+  labeled: number;
+  pending: number;
+  alerted: number;
+  correct: number;
+  accuracy: number;
+  confidence_rate: number;
+  wilson_lower_95: number;
+  wilson_upper_95: number;
+  true_positives: number;
+  true_negatives: number;
+  false_positives: number;
+  false_negatives: number;
+  sensitivity: number;
+  specificity: number;
+  scorable: boolean;
+}
+
+export interface GtMicroRegionView {
+  region: string;
+  spot_risk: number;
+  risk_3d_avg: number;
+  risk_delta: number;
+  days_in_window: number;
+  day_scores: number[];
+  alerted_spot: boolean;
+  alerted_3d: boolean;
+  ignition: boolean;
+  financial: number;
+  unrest: number;
+  conflict: number;
+}
+
+export interface GtMicroRollingReport {
+  enabled?: boolean;
+  mode?: string;
+  window_days: number;
+  alert_threshold: number;
+  ignition_delta: number;
+  as_of: string;
+  days_stored: number;
+  regions_tracked: number;
+  ignition_count: number;
+  alerted_3d_count: number;
+  ignitions: GtMicroRegionView[];
+  top_regions: GtMicroRegionView[];
+  note?: string;
+  message?: string;
+}
+
+export interface GtRollingReport {
+  enabled?: boolean;
+  mode?: string;
+  alert_threshold: number;
+  target_confidence: number;
+  weeks_requested: number;
+  weeks_stored: number;
+  weeks_scorable: number;
+  min_labeled_per_week: number;
+  latest: GtRollingWeekScore | null;
+  trend: GtRollingWeekScore[];
+  accuracy_series: { week_id: string; accuracy: number; labeled: number }[];
+  improving_vs_prior: boolean;
+  meets_target: boolean;
+  note?: string;
+  message?: string;
+}
+
+export interface GtDossier {
+  enabled?: boolean;
+  region: string;
+  current_risk: number;
+  domain_risks?: {
+    financial?: number;
+    unrest?: number;
+    conflict?: number;
+  };
+  recent_signals?: GtDossierSignalEntry[];
+  contagion_risk?: number;
+  interpretation?: string;
+  scenarios?: Array<{ name: string; summary: string }>;
+}
+
+export interface TelegramOsintPost {
+  id: string;
+  title?: string;
+  description?: string;
+  title_translated?: string;
+  description_translated?: string;
+  source_lang?: string;
+  source_lang_label?: string;
+  translate_to?: string;
+  link?: string;
+  published?: string;
+  source?: string;
+  channel?: string;
+  risk_score?: number;
+  coords?: [number, number] | null;
+  media_type?: 'video' | 'photo' | null;
+  media_url?: string | null;
+  embed_url?: string | null;
+}
+
+export interface MalwareThreat {
+  id: string;
+  lat: number;
+  lng: number;
+  ip: string;
+  port?: number;
+  malware: string;
+  status?: string;
+  country?: string;
+  threat_type?: string;
+}
+
+export interface ScmSupplier {
+  id: string;
+  name: string;
+  city: string;
+  country: string;
+  category: string;
+  lat: number;
+  lng: number;
+  risk_level: string;
+  active_threats: string[];
 }
 
 // ─── SAR ─────────────────────────────────────────────────────────────────────
@@ -1030,6 +1295,13 @@ export interface ActiveLayers {
   ai_intel: boolean;
   crowdthreat: boolean;
   sar: boolean;
+  road_corridor_trends: boolean;
+  malware_c2: boolean;
+  submarine_cables: boolean;
+  scm_suppliers: boolean;
+  cyber_threats: boolean;
+  telegram_osint: boolean;
+  gt_risk: boolean;
 }
 
 export interface SelectedEntity {

@@ -4,183 +4,104 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   X,
-  Terminal,
-  Bot,
   Network,
-  Scale,
   KeyRound,
-  Cpu,
-  Layers,
-  GitBranch,
   Shield,
-  Plane,
-  Clock,
-  Satellite,
   Bug,
   Heart,
+  MessageSquare,
+  Lock,
+  Users,
+  Radio,
 } from 'lucide-react';
 
-const CURRENT_VERSION = '0.9.81';
+const CURRENT_VERSION = '0.9.83';
 const STORAGE_KEY = `shadowbroker_changelog_v${CURRENT_VERSION}`;
-const RELEASE_TITLE = 'Signed Auto-Update + Update Button Race Fix';
+const RELEASE_TITLE = 'Infonet Gate Messaging + DM Protocols Live';
 
 const HEADLINE_FEATURES = [
   {
-    icon: <KeyRound size={20} className="text-purple-400" />,
+    icon: <Lock size={20} className="text-purple-400" />,
     accent: 'purple' as const,
-    title: 'Signed Auto-Update Going Forward (one manual hop)',
-    subtitle: 'After installing v0.9.81, the in-app Update button finally works end-to-end. This release establishes a fresh signing key — every release from here is a one-click upgrade.',
+    title: 'Gate Messaging — End-to-End on the Hashchain',
+    subtitle:
+      'Encrypted MLS gate rooms now carry live chat over your private Infonet hashchain. Messages replicate across participant nodes via swarm push/pull — only gate members can decrypt.',
     details: [
-      'tauri.conf.json now carries a fresh minisign pubkey (the previous keypair was generated before v0.9.79 shipped but the matching private key was lost before any release was actually signed, so no release before v0.9.81 has working auto-update).',
-      'The v0.9.81 release artifacts ship with a signed latest.json + .sig files so every install on v0.9.81 or later can verify and apply the next release automatically via the Tauri updater plugin.',
-      'One-time cost: if you are upgrading from v0.9.79 or v0.9.8, the click-Update path falls back to a manual download because the new pubkey does not match the one baked into your install. Click the MANUAL DOWNLOAD button in the update dialog → grab the .msi from the release page → run it → from then on auto-update works in-app.',
+      'Gate messages append as signed `gate_message` events on each participant\'s private chain; peers sync ciphertext through the mesh without exposing room keys to outsiders.',
+      'Swarm replication keeps late joiners and offline nodes convergent — pull missing blocks, push new envelopes to known gate peers.',
+      'MLS group crypto (privacy-core) handles forward secrecy and membership changes; the UI surfaces delivery, key rotation, and compat approval when room epochs advance.',
     ],
-    callToAction: 'CLICK UPDATE → DOWNLOAD MSI ONCE → AUTO-UPDATE FOREVER',
+    callToAction: 'MESH CHAT → GATES → CREATE OR JOIN A ROOM',
+  },
+  {
+    icon: <MessageSquare size={20} className="text-cyan-400" />,
+    accent: 'cyan' as const,
+    title: 'Direct Messages — Short Address, Request, Encrypt',
+    subtitle:
+      'DMs are fully operational over the wormhole/Tor lane: share your short wormhole address out-of-band, accept a contact request, then exchange ratchet-encrypted messages.',
+    details: [
+      'Contact flow: outbound request → peer approve/deny → mutual DM session with double-ratchet bundles and mailbox claim keys.',
+      'No public phonebook — addresses are intentionally short and meant to be exchanged like a phone number or email, not discovered from a directory.',
+      'Fleet-tested across multiple onion participants: request, accept, decrypt, and reply paths verified on live Tor hidden services.',
+    ],
+    callToAction: 'MESH CHAT → DIRECT → SHARE SHORT ADDRESS',
   },
   {
     icon: <Network size={20} className="text-amber-400" />,
     accent: 'cyan' as const,
-    title: 'AIS Maritime Resilience — Outage Banner + AISHub Fallback',
-    subtitle: 'When AISStream’s WebSocket goes offline (as happened upstream in May 2026), the ships layer no longer goes silently empty.',
+    title: 'Infonet Transport Hardening',
+    subtitle:
+      'Tor/Arti warmup, SOCKS readiness, and terminal session lifecycle fixes so sovereign nodes actually join the mesh instead of sitting on NODE ARTI WARMING.',
     details: [
-      'AIS proxy health surfaces in /api/health: connected, last_msg_age_seconds, proxy_spawn_count. A dismissible amber banner explains the outage (“Ship data temporarily unavailable — AISStream upstream is offline”) instead of letting users assume their install is broken.',
-      'AISHub REST fallback (free tier at aishub.net/api). Polls every 20 minutes when the primary is disconnected and merges vessels into the same store with source: “aishub” so existing tooling attributes the provider.',
-      'Live data wins races: if the WebSocket reconnects mid-poll, fresh AISStream updates aren’t overwritten by stale REST records. Opt-in via AISHUB_USERNAME; cadence configurable via AISHUB_POLL_INTERVAL_MINUTES (clamped [1, 360]).',
+      'Tor hidden service config always exposes SOCKS; readiness probes cache and recover wedged transports instead of blocking wormhole sync indefinitely.',
+      'Leaving the Infonet terminal now tears down wormhole prep, leaves the session, and stops Tor when the UI enabled it — no ghost connections after close.',
+      'Network stats distinguish real transport warmup from stale sync backoff so operators see actionable status instead of a permanent warming spinner.',
     ],
-    callToAction: 'SET AISHUB_USERNAME \u2192 RESTART BACKEND',
-  },
-  {
-    icon: <Shield size={20} className="text-cyan-400" />,
-    accent: 'cyan' as const,
-    title: 'Data-Layer Repair \u2014 UAP Cutoff + GPS Jamming Detection',
-    subtitle: 'Two long-broken layers fixed at the source. UFO sightings are actually recent now; GPS jamming zones actually fire.',
-    details: [
-      'UAP sightings: the Hugging Face NUFORC mirror fallback had no date cutoff, so when the live nuforc.org scrape failed the layer served 3-year-old reports as \u201crecent\u201d. Now drops rows older than 60 days and logs loudly when the mirror is fully stale. Scheduler moved daily \u2192 weekly (Mondays 12:00 UTC).',
-      'GPS jamming: three stacked filters meant the layer almost never lit up. nac_p == 0 (\u201cGPS lock lost\u201d) was filtered out as if it were an old transponder \u2014 it\u2019s actually the strongest jamming signal. Now counted. MIN_AIRCRAFT lowered 5 \u2192 3 so sparser hotspots clear; MIN_RATIO lowered 0.30 \u2192 0.20.',
-      'Both layers now surface their own outages via assert_canary so operators see broken vs empty, not silently stale.',
-    ],
-    callToAction: 'TOGGLE UAP \u2022 GPS JAMMING LAYERS',
+    callToAction: 'TOP RIGHT → ENTER INFONET → CHECK NODE STATUS',
   },
 ];
 
 const NEW_FEATURES = [
   {
-    icon: <Plane size={18} className="text-orange-400" />,
-    title: 'Cumulative Fuel & CO2 per Flight',
-    desc: 'Aircraft tooltip now shows how much fuel each plane has actually burned in the air since first observation, not just the per-hour rate. 15-minute gap between sightings resets the session; 24-hour clamp protects against clock skew; per-icao prune every 5 minutes keeps memory bounded.',
+    icon: <Users size={18} className="text-purple-400" />,
+    title: 'Gate Swarm Replication',
+    desc: 'Participant nodes push and pull gate hashchain segments so encrypted room history converges across the fleet without a central relay.',
   },
   {
-    icon: <Plane size={18} className="text-cyan-400" />,
-    title: 'Per-Flight Source Attribution',
-    desc: 'Every aircraft record now carries a source field (adsb.lol, OpenSky, airplanes.live, adsb.fi) so consumers can attribute the data provider. Pre-fix, adsb.lol records were unmarked while OpenSky records were explicitly tagged, making it look like adsb.lol was unused even though it is the primary source.',
+    icon: <KeyRound size={18} className="text-cyan-400" />,
+    title: 'DM Contact Requests',
+    desc: 'Pending inbound/outbound access requests with approve, deny, and scoped per-node DM state — no cross-identity leakage in local storage.',
   },
   {
-    icon: <Network size={18} className="text-green-400" />,
-    title: 'Cross-Node DM Mailbox Replication',
-    desc: 'Direct messages now replicate across mesh nodes when one party is offline. Per-(sender, recipient) anti-spam cap enforced as a network rule (not client-side) so source-code tampering cannot bypass it.',
+    icon: <Radio size={18} className="text-green-400" />,
+    title: 'Wormhole Session Teardown',
+    desc: 'Closing the Infonet terminal aborts in-flight wormhole prep, leaves the lane, and resets launcher busy state for clean re-entry.',
   },
   {
-    icon: <Clock size={18} className="text-amber-400" />,
-    title: 'Infonet Sync — HTTP 429 Honored',
-    desc: 'When an upstream peer returns Retry-After, the node now waits exactly that long instead of retrying every 60 seconds and keeping the upstream rate-limit bucket permanently full. Exponential backoff on consecutive failures capped at 30 minutes.',
+    icon: <Shield size={18} className="text-amber-400" />,
+    title: 'Fail-Closed Tor Proof',
+    desc: 'Onion sync waits for a working SOCKS handshake before declaring transport ready — prevents silent half-open mesh joins.',
   },
 ];
 
 const BUG_FIXES = [
-  'Update button no longer throws "admin_session_required" on desktop installs. The initial updateAction now syncs to Tauri detection at React-init time (window.__TAURI__ is injected before mount), so a click before the async runtime probe completes opens the GitHub release page in a browser instead of POSTing to /api/system/update.',
-  'Desktop installer now bundles defusedxml + PySocks (declared in pyproject.toml but missing from the venv shipped with v0.9.79 and the initial v0.9.8 publish). Fixes the bundled-backend launch crash reported in #319 and #296 (managed_backend_exited_early:exit code: 103).',
-  'UAP layer no longer serves 3-year-old NUFORC sightings via the Hugging Face static-mirror fallback (60-day cutoff now applied to the fallback path too).',
-  'GPS jamming detection now counts nac_p == 0 (the actual GPS-lost signal) instead of filtering it out as an old-transponder artifact.',
-  'GPS jamming thresholds lowered (MIN_AIRCRAFT 5 → 3, MIN_RATIO 0.30 → 0.20) so sparser hotspots clear the bar without losing the 1-aircraft noise cushion.',
-  'AIS layer surfaces an outage banner when the AISStream WebSocket upstream is offline, instead of silently showing an empty ocean.',
-  'Flight emissions tooltip now shows cumulative fuel/CO2 since first observation, not just the per-hour rate.',
-  'Per-aircraft observation tracker (15-min reopen gap, 24-hour clamp) survives trail-rendering cache pruning so cumulative counters do not reset mid-flight.',
-  'UAP scheduler moved daily → weekly (Mondays 12:00 UTC) to match the layer’s rolling-window cadence and reduce upstream load.',
+  'Arti/Tor transport no longer omits SocksPort when MESH_ARTI_ENABLED — SOCKS probes succeed and wormhole sync can start.',
+  'Concurrent Arti readiness checks no longer wedge Tor under load; single-flight probes with auto-recycle when SOCKS stalls.',
+  'Infonet terminal exit no longer leaves background wormhole prep or terminalLaunchBusy stuck after close.',
+  'Stale onion sync backoff clears when transport recovers so NODE ARTI WARMING does not persist after Tor is healthy.',
+  'DM decrypt timeouts on multi-participant fleets addressed via improved peer push timing and mailbox claim sequencing.',
 ];
 
-const CONTRIBUTORS = [
+type ChangelogContributor = {
+  name: string;
+  desc: string;
+  pr?: string;
+};
+
+const CONTRIBUTORS: ChangelogContributor[] = [
   {
-    name: '@Alienmajik',
-    desc: 'Raspberry Pi 5 support — ARM64 packaging, headless deployment notes, and runtime tuning for Pi-class hardware',
-  },
-  {
-    name: '@wa1id',
-    desc: 'CCTV ingestion fix — fresh SQLite connections per ingest, persistent DB path, startup hydration, cluster clickability',
-    pr: '#92',
-  },
-  {
-    name: '@AlborzNazari',
-    desc: 'Spain DGT + Madrid CCTV sources and STIX 2.1 threat intelligence export endpoint',
-    pr: '#91',
-  },
-  {
-    name: '@adust09',
-    desc: 'Power plants layer, East Asia intel coverage (JSDF bases, ICAO enrichment, Taiwan news sources, military classification)',
-    pr: '#71, #72, #76, #77, #87',
-  },
-  {
-    name: '@Xpirix',
-    desc: 'LocateBar style and interaction improvements',
-    pr: '#78',
-  },
-  {
-    name: '@imqdcr',
-    desc: 'Ship toggle split into 4 categories + stable MMSI/callsign entity IDs for map markers',
-    pr: '#52',
-  },
-  {
-    name: '@csysp',
-    desc: 'Dismissible threat alerts + stable entity IDs for GDELT & News popups + UI declutter',
-    pr: '#48, #61, #63',
-  },
-  {
-    name: '@suranyami',
-    desc: 'Parallel multi-arch Docker builds (11min \u2192 3min) + runtime BACKEND_URL fix',
-    pr: '#35, #44',
-  },
-  {
-    name: '@chr0n1x',
-    desc: 'Kubernetes / Helm chart architecture for high-availability deployments',
-  },
-  {
-    name: '@johan-martensson',
-    desc: 'COSMO-SkyMed satellite classification fix + yfinance batch download optimization',
-    pr: '#96, #98',
-  },
-  {
-    name: '@singularfailure',
-    desc: 'Spanish CCTV feeds + image loading fix',
-    pr: '#93',
-  },
-  {
-    name: '@smithbh',
-    desc: 'Makefile-based taskrunner with LAN/local access options',
-    pr: '#103',
-  },
-  {
-    name: '@OrfeoTerkuci',
-    desc: 'UV project management setup',
-    pr: '#102',
-  },
-  {
-    name: '@deuza',
-    desc: 'dos2unix fix for Mac/Linux quick start',
-    pr: '#101',
-  },
-  {
-    name: '@tm-const',
-    desc: 'CI/CD workflow updates',
-    pr: '#108, #109',
-  },
-  {
-    name: '@Elhard1',
-    desc: 'start.sh shell script fix',
-    pr: '#111',
-  },
-  {
-    name: '@ttulttul',
-    desc: 'Podman compose support + frontend production CSS fix',
-    pr: '#23',
+    name: 'privacy-core (MLS)',
+    desc: 'Rust MLS gate crypto — WASM/FFI path for browser and Tauri sovereign shells',
   },
 ];
 
@@ -252,7 +173,6 @@ const ChangelogModal = React.memo(function ChangelogModal({ onClose }: Changelog
 
           {/* Content */}
           <div className="flex-1 overflow-y-auto styled-scrollbar p-5 space-y-5">
-            {/* === HEADLINE PAIR: OpenClaw API + InfoNet === */}
             {HEADLINE_FEATURES.map((h, idx) => {
               const isPurple = h.accent === 'purple';
               const cardClass = isPurple
@@ -292,23 +212,6 @@ const ChangelogModal = React.memo(function ChangelogModal({ onClose }: Changelog
                     ))}
                   </div>
 
-                  {!isPurple && (
-                    <div className="flex items-start gap-2 p-2.5 border border-red-500/30 bg-red-950/20">
-                      <span className="text-red-400 text-xs mt-0.5 flex-shrink-0 font-bold">!!</span>
-                      <div className="space-y-1.5">
-                        <span className="text-[11px] font-mono text-red-400/90 leading-relaxed block font-bold">
-                          EXPERIMENTAL TESTNET &mdash; NO PRIVACY GUARANTEE
-                        </span>
-                        <span className="text-[11px] font-mono text-amber-400/80 leading-relaxed block">
-                          InfoNet messages are obfuscated but NOT encrypted end-to-end. The Mesh
-                          network (Meshtastic/APRS) is NOT private &mdash; radio transmissions are
-                          inherently public. The privacy primitive contracts are scaffolded but not
-                          yet wired. Treat all channels as open and public for now.
-                        </span>
-                      </div>
-                    </div>
-                  )}
-
                   <div className="text-center pt-1">
                     <span className={ctaClass}>{h.callToAction}</span>
                   </div>
@@ -316,34 +219,23 @@ const ChangelogModal = React.memo(function ChangelogModal({ onClose }: Changelog
               );
             })}
 
-            {/* === Required-config callout: OpenSky API === */}
-            <div className="border border-amber-500/40 bg-amber-950/20 p-3 flex items-start gap-3">
-              <Plane size={18} className="text-amber-400 mt-0.5 flex-shrink-0" />
+            {/* Auto-update note for v0.9.82+ installs */}
+            <div className="border border-green-500/30 bg-green-950/15 p-3 flex items-start gap-3">
+              <KeyRound size={18} className="text-green-400 mt-0.5 flex-shrink-0" />
               <div className="space-y-1">
-                <div className="text-xs font-mono text-amber-300 font-bold tracking-wide uppercase">
-                  Required: OpenSky API credentials for airplane telemetry
+                <div className="text-xs font-mono text-green-300 font-bold tracking-wide uppercase">
+                  One-click update from v0.9.82
                 </div>
-                <div className="text-xs font-mono text-amber-200/80 leading-relaxed">
-                  Airplane telemetry now requires an OpenSky Network OAuth2 client. Set{' '}
-                  <span className="text-amber-100 font-bold">OPENSKY_CLIENT_ID</span> and{' '}
-                  <span className="text-amber-100 font-bold">OPENSKY_CLIENT_SECRET</span> in your{' '}
-                  <span className="text-amber-100 font-bold">.env</span>. Free registration:{' '}
-                  <a
-                    href="https://opensky-network.org/index.php?option=com_users&view=registration"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-amber-100 font-bold underline underline-offset-2 hover:text-amber-50"
-                  >
-                    opensky-network.org/register
-                  </a>
-                  . Without these the flights layer falls back to ADS-B-only coverage with
-                  significant gaps in Africa, Asia, and Latin America, and the startup environment
-                  check will surface a critical warning.
+                <div className="text-xs font-mono text-green-200/80 leading-relaxed">
+                  If you installed v0.9.82, the in-app Update button verifies this release via the
+                  signed Tauri updater (`latest.json` + minisign). Desktop installs on v0.9.82 or
+                  later should auto-apply v0.9.83 without a manual MSI hop once the release is
+                  published.
                 </div>
               </div>
             </div>
 
-            {/* === Other New Features === */}
+            {/* Other New Features */}
             <div>
               <div className="text-xs font-mono tracking-[0.2em] text-cyan-400 font-bold mb-3 flex items-center gap-2">
                 <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
@@ -391,7 +283,7 @@ const ChangelogModal = React.memo(function ChangelogModal({ onClose }: Changelog
             <div>
               <div className="text-xs font-mono tracking-[0.2em] text-pink-400 font-bold mb-3 flex items-center gap-2">
                 <Heart size={14} className="text-pink-400" />
-                COMMUNITY CONTRIBUTORS
+                CREDITS &amp; CONTRIBUTORS
               </div>
               <div className="space-y-1.5">
                 {CONTRIBUTORS.map((c, i) => (
@@ -399,9 +291,7 @@ const ChangelogModal = React.memo(function ChangelogModal({ onClose }: Changelog
                     key={i}
                     className="flex items-start gap-2 px-3 py-2 border border-pink-500/20 bg-pink-500/5"
                   >
-                    <span className="text-pink-400 text-xs mt-0.5 flex-shrink-0">
-                      &hearts;
-                    </span>
+                    <span className="text-pink-400 text-xs mt-0.5 flex-shrink-0">&hearts;</span>
                     <div>
                       <span className="text-[13px] font-mono text-pink-300 font-bold">
                         {c.name}

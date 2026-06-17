@@ -130,16 +130,17 @@ describe('unchanged directives in production', () => {
     vi.unstubAllEnvs();
   });
 
-  it('style-src preserves unsafe-inline and Google Fonts', () => {
+  it('style-src preserves unsafe-inline without runtime Google Fonts', () => {
     const styleSrc = getDirective('style-src');
     expect(styleSrc).toContain("'unsafe-inline'");
-    expect(styleSrc).toContain('https://fonts.googleapis.com');
+    expect(styleSrc).not.toContain('https://fonts.googleapis.com');
   });
 
-  it('font-src preserves data: and fonts.gstatic.com', () => {
+  it('font-src preserves self and data without runtime Google Fonts', () => {
     const fontSrc = getDirective('font-src');
+    expect(fontSrc).toContain("'self'");
     expect(fontSrc).toContain('data:');
-    expect(fontSrc).toContain('https://fonts.gstatic.com');
+    expect(fontSrc).not.toContain('https://fonts.gstatic.com');
   });
 
   it('worker-src self blob:', () => {

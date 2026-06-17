@@ -43,14 +43,20 @@ import {
   Droplets,
   Radar,
   MapPin,
+  Truck,
 } from 'lucide-react';
+import RoadCorridorLayerControls from '@/components/RoadCorridorLayerControls';
 import { API_BASE } from '@/lib/api';
+import { useLiveUamapScraperOptIn } from '@/hooks/useLiveUamapScraperOptIn';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { onTileLoadingChange, resetTileLoading } from '@/lib/sentinelHub';
 import packageJson from '../../package.json';
 import { useTheme } from '@/lib/ThemeContext';
 import { useTranslation } from '@/i18n';
 import SarModeChooserModal from './SarModeChooserModal';
 import KiwiSdrConsentDialog from './ui/KiwiSdrConsentDialog';
+import { extractGtAlerts } from '@/lib/gtAlerts';
+import { gtLeanLayerWarning, useRuntimeProfile } from '@/hooks/useRuntimeProfile';
 
 function relativeTime(iso: string | undefined): string {
   if (!iso) return '';
@@ -105,6 +111,13 @@ const FRESHNESS_MAP: Record<string, string> = {
   wastewater: 'wastewater',
   ai_intel: '',
   crowdthreat: 'crowdthreat',
+  road_corridor_trends: 'road_corridor_trends',
+  malware_c2: 'malware_threats',
+  submarine_cables: '',
+  scm_suppliers: 'scm_suppliers',
+  cyber_threats: 'cyber_threats',
+  telegram_osint: 'telegram_osint',
+  gt_risk: 'gt_risk',
 };
 
 // POTUS fleet ICAO hex codes for client-side filtering
@@ -623,6 +636,16 @@ function SdrTracker({
   );
 }
 
+// Earth-imagery overlays are intentionally excluded from bulk toggle — stacking
+// GIBS, Sentinel Hub, nightlights, and high-res tiles is redundant/noisy.
+const TOGGLE_ALL_EXCLUDED_LAYERS = new Set<string>([
+  'gibs_imagery',
+  'highres_satellite',
+  'sentinel_hub',
+  'viirs_nightlights',
+  'road_corridor_trends',
+]);
+
 const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
   activeLayers,
   setActiveLayers,
@@ -648,6 +671,7 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
   isMinimized: isMinimizedProp,
   onMinimizedChange,
   onOpenSarAoiEditor,
+  viewBoundsRef,
 }: {
   activeLayers: ActiveLayers;
   setActiveLayers: React.Dispatch<React.SetStateAction<ActiveLayers>>;
@@ -673,6 +697,7 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
   isMinimized?: boolean;
   onMinimizedChange?: (minimized: boolean) => void;
   onOpenSarAoiEditor?: () => void;
+  viewBoundsRef?: React.RefObject<{ south: number; west: number; north: number; east: number } | null>;
 }) {
   const data = useDataSnapshot() as import('@/types/dashboard').DashboardData;
   const { t } = useTranslation();
@@ -701,6 +726,63 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
   });
   const [sarModalOpen, setSarModalOpen] = useState(false);
   const [sarPendingEnable, setSarPendingEnable] = useState(false);
+
+  const [liveuamapModalOpen, setLiveuamapModalOpen] = useState(false);
+  const [liveuamapPendingEnable, setLiveuamapPendingEnable] = useState<(() => void) | null>(null);
+  const [gtLeanModalOpen, setGtLeanModalOpen] = useState(false);
+  const [gtLeanPendingEnable, setGtLeanPendingEnable] = useState<(() => void) | null>(null);
+  const { needsConsentBeforeEnable, confirmOptIn } = useLiveUamapScraperOptIn();
+  const runtimeProfile = useRuntimeProfile();
+  const gtLeanWarning = gtLeanLayerWarning(runtimeProfile);
+
+  const withGlobalIncidentsConsent = useCallback(
+    (layerId: string, turningOn: boolean, apply: () => void) => {
+      if (needsConsentBeforeEnable(layerId, turningOn)) {
+        setLiveuamapPendingEnable(() => apply);
+        setLiveuamapModalOpen(true);
+        return;
+      }
+      apply();
+    },
+    [needsConsentBeforeEnable],
+  );
+
+  const withGtRiskLeanWarning = useCallback(
+    (layerId: string, turningOn: boolean, apply: () => void) => {
+      if (layerId === 'gt_risk' && turningOn && gtLeanWarning) {
+        setGtLeanPendingEnable(() => apply);
+        setGtLeanModalOpen(true);
+        return;
+      }
+      apply();
+    },
+    [gtLeanWarning],
+  );
+
+  const isAllToggleableLayersOn = useMemo(
+    () =>
+      Object.entries(activeLayers)
+        .filter(([key]) => !TOGGLE_ALL_EXCLUDED_LAYERS.has(key))
+        .every(([, enabled]) => enabled),
+    [activeLayers],
+  );
+
+  const toggleAllLayers = useCallback(() => {
+    const enableAll = () => {
+      setActiveLayers((prev: ActiveLayers) => {
+        const next = { ...prev } as ActiveLayers;
+        for (const key of Object.keys(prev) as Array<keyof ActiveLayers>) {
+          next[key] = TOGGLE_ALL_EXCLUDED_LAYERS.has(String(key)) ? prev[key] : !isAllToggleableLayersOn;
+        }
+        return next;
+      });
+    };
+    if (!isAllToggleableLayersOn) {
+      withGlobalIncidentsConsent('global_incidents', true, enableAll);
+    } else {
+      enableAll();
+    }
+  }, [isAllToggleableLayersOn, setActiveLayers, withGlobalIncidentsConsent]);
 
   // Auto-detect: if the backend already has Mode B creds configured
   // (via env or a previous runtime save), promote the stored choice to
@@ -1021,6 +1103,15 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
           count: null,
           icon: Moon,
         },
+        {
+          id: 'road_corridor_trends',
+          name: t('layers.roadCorridorTrends'),
+          source: t('layers.roadCorridorSource'),
+          count:
+            data?.road_corridor_trends?.corridors?.filter((c) => (c.total_detections ?? 0) > 0)
+              .length ?? 0,
+          icon: Truck,
+        },
       ],
     },
     {
@@ -1155,6 +1246,34 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
           count: data?.trains?.length || 0,
           icon: TrainFront,
         },
+        {
+          id: 'submarine_cables',
+          name: t('layers.submarineCables'),
+          source: 'TeleGeography (static)',
+          count: null,
+          icon: Globe,
+        },
+        {
+          id: 'malware_c2',
+          name: t('layers.malwareC2'),
+          source: 'abuse.ch',
+          count: data?.malware_threats?.total || 0,
+          icon: Shield,
+        },
+        {
+          id: 'scm_suppliers',
+          name: t('layers.scmSuppliers'),
+          source: 'Tier 1/2 overlay',
+          count: data?.scm_suppliers?.critical_count || 0,
+          icon: Truck,
+        },
+        {
+          id: 'cyber_threats',
+          name: t('layers.cyberThreats'),
+          source: 'CISA KEV',
+          count: data?.cyber_threats?.threats?.length || 0,
+          icon: AlertTriangle,
+        },
       ],
     },
     {
@@ -1244,6 +1363,13 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
           icon: Activity,
         },
         {
+          id: 'telegram_osint',
+          name: t('layers.telegramOsint'),
+          source: 't.me public channels',
+          count: data?.telegram_osint?.geolocated || 0,
+          icon: Radio,
+        },
+        {
           id: 'crowdthreat',
           name: t('layers.crowdThreat'),
           source: 'CrowdThreat',
@@ -1263,6 +1389,16 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
           source: 'Narrative Intelligence',
           count: data?.correlations?.filter((c: { type: string }) => c.type === 'contradiction').length || 0,
           icon: Zap,
+        },
+        {
+          id: 'gt_risk',
+          name: t('layers.derivedOsint'),
+          source: t('layers.derivedOsintSource'),
+          count:
+            extractGtAlerts(data?.gt_risk).plottedRegions ||
+            data?.gt_risk?.meta?.plotted_regions ||
+            0,
+          icon: Radar,
         },
         {
           id: 'day_night',
@@ -1285,7 +1421,10 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>(() => {
     const initial: Record<string, boolean> = {};
     sections.forEach((s) => {
-      initial[s.label] = false;
+      // Keep high-traffic intel overlays visible on first paint (GDELT, Telegram, etc.)
+      initial[s.label] = s.layers.some((l) =>
+        ['global_incidents', 'telegram_osint', 'ukraine_frontline', 'gt_risk'].includes(l.id),
+      );
     });
     return initial;
   });
@@ -1381,38 +1520,16 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
           </div>
           <div className="flex items-center gap-2">
             <button
-              title={
-                Object.entries(activeLayers)
-                  .filter(([k]) => !['gibs_imagery', 'highres_satellite', 'sentinel_hub', 'viirs_nightlights'].includes(k))
-                  .every(([, v]) => v)
-                  ? 'Disable all layers'
-                  : 'Enable all layers'
-              }
+              title={isAllToggleableLayersOn ? 'Disable all layers' : 'Enable all layers'}
               className={`${
-                Object.entries(activeLayers)
-                  .filter(([k]) => !['gibs_imagery', 'highres_satellite', 'sentinel_hub', 'viirs_nightlights'].includes(k))
-                  .every(([, v]) => v)
-                  ? 'text-cyan-400'
-                  : 'text-[var(--text-muted)]'
+                isAllToggleableLayersOn ? 'text-cyan-400' : 'text-[var(--text-muted)]'
               } hover:text-cyan-400 transition-colors`}
               onClick={(e) => {
                 e.stopPropagation();
-                const excluded = new Set(['gibs_imagery', 'highres_satellite', 'sentinel_hub', 'viirs_nightlights']);
-                const allOn = Object.entries(activeLayers)
-                  .filter(([k]) => !excluded.has(k))
-                  .every(([, v]) => v);
-                setActiveLayers((prev: ActiveLayers) => {
-                  const next = { ...prev } as ActiveLayers;
-                  for (const k of Object.keys(prev) as Array<keyof ActiveLayers>) {
-                    next[k] = excluded.has(k) ? prev[k] : !allOn;
-                  }
-                  return next;
-                });
+                toggleAllLayers();
               }}
             >
-              {Object.entries(activeLayers)
-                .filter(([k]) => !['gibs_imagery', 'highres_satellite', 'sentinel_hub', 'viirs_nightlights'].includes(k))
-                .every(([, v]) => v) ? (
+              {isAllToggleableLayersOn ? (
                 <ToggleRight size={22} />
               ) : (
                 <ToggleLeft size={22} />
@@ -1595,13 +1712,23 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
                                 : 'rgb(100 116 139 / 0.3)',
                           }}
                           onClick={() => {
-                            setActiveLayers((prev: ActiveLayers) => {
-                              const next = { ...prev } as ActiveLayers;
-                              for (const id of sectionLayerIds as Array<keyof ActiveLayers>) {
-                                next[id] = !allOn;
-                              }
-                              return next;
-                            });
+                            const toggleSection = () => {
+                              setActiveLayers((prev: ActiveLayers) => {
+                                const next = { ...prev } as ActiveLayers;
+                                for (const id of sectionLayerIds as Array<keyof ActiveLayers>) {
+                                  next[id] = !allOn;
+                                }
+                                return next;
+                              });
+                            };
+                            if (
+                              !allOn &&
+                              (sectionLayerIds as string[]).includes('global_incidents')
+                            ) {
+                              withGlobalIncidentsConsent('global_incidents', true, toggleSection);
+                            } else {
+                              toggleSection();
+                            }
                           }}
                           title={
                             allOn ? `Disable all ${section.label}` : `Enable all ${section.label}`
@@ -1647,10 +1774,14 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
                                       setSarModalOpen(true);
                                       return;
                                     }
-                                    setActiveLayers((prev: ActiveLayers) => ({
-                                      ...prev,
-                                      [layer.id]: !active,
-                                    }));
+                                    withGlobalIncidentsConsent(layer.id, !active, () => {
+                                      withGtRiskLeanWarning(layer.id, !active, () => {
+                                        setActiveLayers((prev: ActiveLayers) => ({
+                                          ...prev,
+                                          [layer.id]: !active,
+                                        }));
+                                      });
+                                    });
                                   }}
                                 >
                                   <div className="flex gap-3">
@@ -1802,6 +1933,9 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
                                     </div>
                                   )}
                                 {/* SAR inline controls — AOI editor button */}
+                                {active && layer.id === 'road_corridor_trends' && (
+                                  <RoadCorridorLayerControls viewBoundsRef={viewBoundsRef} />
+                                )}
                                 {active && layer.id === 'sar' && onOpenSarAoiEditor && (
                                   <div
                                     className="ml-7 mt-2 flex items-center gap-2"
@@ -1953,6 +2087,48 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
         }}
       />
     )}
+    <ConfirmDialog
+      open={liveuamapModalOpen}
+      title="Enable LiveUAMap on this server?"
+      message="Global Incidents includes LiveUAMap pins fetched by your Shadowbroker backend (Playwright). LiveUAMap will see this install's server IP. GDELT headlines load without this step. You can still disable the layer later; revoke server contact via Settings or SHADOWBROKER_ENABLE_LIVEUAMAP_SCRAPER=false."
+      confirmLabel="Enable & turn on layer"
+      cancelLabel="Cancel"
+      danger={false}
+      onCancel={() => {
+        setLiveuamapModalOpen(false);
+        setLiveuamapPendingEnable(null);
+      }}
+      onConfirm={() => {
+        void (async () => {
+          try {
+            await confirmOptIn();
+            liveuamapPendingEnable?.();
+          } catch (e) {
+            console.warn('LiveUAMap opt-in failed:', e);
+          } finally {
+            setLiveuamapModalOpen(false);
+            setLiveuamapPendingEnable(null);
+          }
+        })();
+      }}
+    />
+    <ConfirmDialog
+      open={gtLeanModalOpen}
+      title={t('gtLean.title')}
+      message={gtLeanWarning || t('gtLean.message')}
+      confirmLabel={t('gtLean.confirm')}
+      cancelLabel={t('gtLean.cancel')}
+      danger={false}
+      onCancel={() => {
+        setGtLeanModalOpen(false);
+        setGtLeanPendingEnable(null);
+      }}
+      onConfirm={() => {
+        gtLeanPendingEnable?.();
+        setGtLeanModalOpen(false);
+        setGtLeanPendingEnable(null);
+      }}
+    />
     </>
   );
 });

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+import os
 import threading
 from typing import Any
 from fastapi import APIRouter, Request, Response, Query, Depends
@@ -8,7 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from limiter import limiter
 from auth import require_admin, require_local_operator
-from services.data_fetcher import get_latest_data, update_all_data
+from services.data_fetcher import update_all_data
 import orjson
 import json as json_mod
 
@@ -28,6 +29,14 @@ class ViewportUpdate(BaseModel):
 
 class LayerUpdate(BaseModel):
     layers: dict[str, bool]
+
+
+class LiveUamapOptInUpdate(BaseModel):
+    opted_in: bool
+
+
+class PredictionMarketsOptInUpdate(BaseModel):
+    opted_in: bool
 
 
 _LAST_VIEWPORT_UPDATE: tuple | None = None
@@ -200,6 +209,15 @@ def _sanitize_payload(value):
     if isinstance(value, (list, tuple)):
         return list(value)
     return value
+
+
+def _live_data_json_bytes(payload: dict) -> bytes:
+    """Serialize dashboard payloads with the same defensive orjson options everywhere."""
+    return orjson.dumps(
+        _sanitize_payload(payload),
+        default=str,
+        option=orjson.OPT_NON_STR_KEYS,
+    )
 
 
 def _bbox_filter(items: list, s: float, w: float, n: float, e: float,
@@ -386,6 +404,95 @@ async def update_viewport(vp: ViewportUpdate, request: Request):  # noqa: ARG001
     return {"status": "ok"}
 
 
+@router.get("/api/liveuamap/scraper-status", dependencies=[Depends(require_local_operator)])
+async def api_liveuamap_scraper_status():
+    """Whether LiveUAMap Playwright may run (Windows needs UI opt-in unless env forces)."""
+    from services.liveuamap_settings import liveuamap_scraper_status
+
+    return liveuamap_scraper_status()
+
+
+@router.post("/api/liveuamap/scraper-opt-in", dependencies=[Depends(require_local_operator)])
+@limiter.limit("10/minute")
+async def api_liveuamap_scraper_opt_in(body: LiveUamapOptInUpdate, request: Request):
+    """Persist operator consent for LiveUAMap scraper (#348)."""
+    from services.liveuamap_settings import liveuamap_scraper_status, set_liveuamap_ui_opt_in
+
+    set_liveuamap_ui_opt_in(body.opted_in)
+    if body.opted_in:
+        from services.fetchers._store import is_any_active
+
+        if is_any_active("global_incidents"):
+            threading.Thread(target=_run_liveuamap_refresh, daemon=True).start()
+    return liveuamap_scraper_status()
+
+
+def _run_liveuamap_refresh() -> None:
+    try:
+        from services.fetchers.geo import update_liveuamap
+
+        update_liveuamap()
+    except Exception as e:
+        logger.warning("LiveUAMap refresh after opt-in failed: %s", e)
+
+
+@router.get("/api/prediction-markets/status", dependencies=[Depends(require_local_operator)])
+async def api_prediction_markets_status():
+    """Whether Polymarket/Kalshi fetches and news market correlation are enabled."""
+    from services.prediction_markets_settings import prediction_markets_status
+
+    return prediction_markets_status()
+
+
+@router.post("/api/prediction-markets/opt-in", dependencies=[Depends(require_local_operator)])
+@limiter.limit("10/minute")
+async def api_prediction_markets_opt_in(body: PredictionMarketsOptInUpdate, request: Request):
+    """Enable or disable prediction market fetches + intercept story correlation."""
+    from services.config import get_settings
+    from services.prediction_markets_settings import (
+        prediction_markets_status,
+        set_prediction_markets_ui_opt_in,
+    )
+    from routers.ai_intel import _write_env_value
+
+    set_prediction_markets_ui_opt_in(body.opted_in)
+    _write_env_value("PREDICTION_MARKETS_ENABLED", "true" if body.opted_in else "false")
+    os.environ["PREDICTION_MARKETS_ENABLED"] = "true" if body.opted_in else "false"
+    get_settings.cache_clear()
+
+    if body.opted_in:
+        threading.Thread(target=_run_prediction_markets_refresh, daemon=True).start()
+    else:
+        threading.Thread(target=_run_prediction_markets_disable, daemon=True).start()
+
+    return prediction_markets_status()
+
+
+def _run_prediction_markets_refresh() -> None:
+    try:
+        from services.fetchers.prediction_markets import fetch_prediction_markets
+        from services.fetchers.news import fetch_news
+
+        fetch_prediction_markets()
+        fetch_news()
+    except Exception as e:
+        logger.warning("Prediction markets refresh after opt-in failed: %s", e)
+
+
+def _run_prediction_markets_disable() -> None:
+    try:
+        from services.fetchers._store import _data_lock, _mark_fresh, latest_data
+        from services.fetchers.news import fetch_news
+
+        with _data_lock:
+            latest_data["prediction_markets"] = []
+            latest_data["trending_markets"] = []
+        _mark_fresh("prediction_markets")
+        fetch_news()
+    except Exception as e:
+        logger.warning("Prediction markets disable cleanup failed: %s", e)
+
+
 @router.post("/api/layers", dependencies=[Depends(require_local_operator)])
 @limiter.limit("30/minute")
 async def update_layers(update: LayerUpdate, request: Request):
@@ -395,6 +502,8 @@ async def update_layers(update: LayerUpdate, request: Request):
     old_mesh = is_any_active("sigint_meshtastic")
     old_aprs = is_any_active("sigint_aprs")
     old_viirs = is_any_active("viirs_nightlights")
+    old_datacenters = is_any_active("datacenters")
+    old_fishing = is_any_active("fishing_activity")
     changed = False
     for key, value in update.layers.items():
         if key in active_layers:
@@ -407,6 +516,8 @@ async def update_layers(update: LayerUpdate, request: Request):
     new_mesh = is_any_active("sigint_meshtastic")
     new_aprs = is_any_active("sigint_aprs")
     new_viirs = is_any_active("viirs_nightlights")
+    new_datacenters = is_any_active("datacenters")
+    new_fishing = is_any_active("fishing_activity")
     if old_ships and not new_ships:
         from services.ais_stream import stop_ais_stream
         stop_ais_stream()
@@ -450,13 +561,33 @@ async def update_layers(update: LayerUpdate, request: Request):
     if not old_viirs and new_viirs:
         _queue_viirs_change_refresh()
         logger.info("VIIRS change refresh queued (layer enabled)")
+    if not old_datacenters and new_datacenters:
+        from services.fetchers.infrastructure import fetch_datacenters
+
+        fetch_datacenters()
+        logger.info("Datacenters loaded (layer enabled)")
+    if not old_fishing and new_fishing:
+        from services.fetchers.geo import fetch_fishing_activity
+
+        fetch_fishing_activity()
+        logger.info("Fishing activity refresh queued (layer enabled)")
     return {"status": "ok"}
 
 
 @router.get("/api/live-data")
 @limiter.limit("120/minute")
 async def live_data(request: Request):
-    return get_latest_data()
+    etag = _current_etag(prefix="live|full|")
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+    from services.fetchers._store import get_latest_data_deepcopy_snapshot
+
+    payload = get_latest_data_deepcopy_snapshot()
+    return Response(
+        content=_live_data_json_bytes(payload),
+        media_type="application/json",
+        headers={"ETag": etag, "Cache-Control": "no-cache"},
+    )
 
 
 @router.get("/api/bootstrap/critical")
@@ -551,7 +682,7 @@ async def bootstrap_critical(request: Request):
         "bootstrap_payload": True,
     }
     return Response(
-        content=orjson.dumps(_sanitize_payload(payload), default=str, option=orjson.OPT_NON_STR_KEYS),
+        content=_live_data_json_bytes(payload),
         media_type="application/json",
         headers={"ETag": etag, "Cache-Control": "no-cache"},
     )
@@ -613,8 +744,11 @@ async def live_data_fast(
     # to the pre-#288 implementation.
     if _has_full_bbox(s, w, n, e):
         payload = _apply_bbox_to_payload(payload, _FAST_BBOX_HEAVY_KEYS, s, w, n, e)
-    return Response(content=orjson.dumps(_sanitize_payload(payload)), media_type="application/json",
-        headers={"ETag": etag, "Cache-Control": "no-cache"})
+    return Response(
+        content=_live_data_json_bytes(payload),
+        media_type="application/json",
+        headers={"ETag": etag, "Cache-Control": "no-cache"},
+    )
 
 
 @router.get("/api/live-data/slow")
@@ -638,7 +772,8 @@ async def live_data_slow(
         "firms_fires", "datacenters", "military_bases", "power_plants", "viirs_change_nodes",
         "scanners", "weather_alerts", "ukraine_alerts", "air_quality", "volcanoes",
         "fishing_activity", "psk_reporter", "correlations", "uap_sightings", "wastewater",
-        "crowdthreat", "threat_level", "trending_markets",
+        "crowdthreat", "threat_level", "trending_markets", "road_corridor_trends",
+        "malware_threats", "cyber_threats", "scm_suppliers", "telegram_osint", "gt_risk",
     )
     freshness = get_source_timestamps_snapshot()
     payload = {
@@ -679,6 +814,37 @@ async def live_data_slow(
         "uap_sightings": (d.get("uap_sightings") or []) if active_layers.get("uap_sightings", True) else [],
         "wastewater": (d.get("wastewater") or []) if active_layers.get("wastewater", True) else [],
         "crowdthreat": (d.get("crowdthreat") or []) if active_layers.get("crowdthreat", True) else [],
+        "road_corridor_trends": (
+            d.get("road_corridor_trends") or {"updated_at": None, "corridors": []}
+        )
+        if active_layers.get("road_corridor_trends", False)
+        else {"updated_at": None, "corridors": []},
+        "malware_threats": (
+            d.get("malware_threats") or {"threats": [], "total": 0}
+        )
+        if active_layers.get("malware_c2", False)
+        else {"threats": [], "total": 0},
+        "cyber_threats": (
+            d.get("cyber_threats") or {"threats": [], "stats": {}}
+        )
+        if active_layers.get("cyber_threats", False)
+        else {"threats": [], "stats": {}},
+        "scm_suppliers": (
+            d.get("scm_suppliers") or {"suppliers": [], "total": 0, "critical_count": 0}
+        )
+        if active_layers.get("scm_suppliers", False)
+        else {"suppliers": [], "total": 0, "critical_count": 0},
+        "telegram_osint": (
+            d.get("telegram_osint") or {"posts": [], "total": 0, "geolocated": 0}
+        )
+        if active_layers.get("telegram_osint", True)
+        else {"posts": [], "total": 0, "geolocated": 0},
+        "gt_risk": (
+            d.get("gt_risk")
+            or {"enabled": False, "heatmap": {"type": "FeatureCollection", "features": []}, "clusters": []}
+        )
+        if active_layers.get("gt_risk", False)
+        else {"enabled": False, "heatmap": {"type": "FeatureCollection", "features": []}, "clusters": []},
         "freshness": freshness,
     }
     # Issue #288: bbox filter heavy/dense layers only when all four bounds
@@ -688,7 +854,7 @@ async def live_data_slow(
     if _has_full_bbox(s, w, n, e):
         payload = _apply_bbox_to_payload(payload, _SLOW_BBOX_HEAVY_KEYS, s, w, n, e)
     return Response(
-        content=orjson.dumps(_sanitize_payload(payload), default=str, option=orjson.OPT_NON_STR_KEYS),
+        content=_live_data_json_bytes(payload),
         media_type="application/json",
         headers={"ETag": etag, "Cache-Control": "no-cache"},
     )

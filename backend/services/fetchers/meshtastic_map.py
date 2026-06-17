@@ -188,8 +188,8 @@ def fetch_meshtastic_nodes():
         callsign = ""
 
     send_callsign_header = str(
-        _os.environ.get("MESHTASTIC_SEND_CALLSIGN_HEADER", "true")
-    ).strip().lower() not in {"0", "false", "no", "off", ""}
+        _os.environ.get("MESHTASTIC_SEND_CALLSIGN_HEADER", "false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
     # Round 7a: outbound_user_agent already includes the per-install handle.
     # The optional Meshtastic callsign is appended as additional context so

@@ -27,11 +27,21 @@ def fetch_liveuamap():
         browser = p.chromium.launch(
             headless=True, args=["--disable-blink-features=AutomationControlled"]
         )
+        from services.network_utils import outbound_user_agent
+
+        # Per-install handle (no shared Shadowbroker product token). Stealth remains
+        # for Turnstile; see docs/OUTBOUND_DATA.md #348.
+        playwright_ua = (
+            f"Mozilla/5.0 (compatible; {outbound_user_agent('liveuamap')})"
+        )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent=playwright_ua,
             viewport={"width": 1920, "height": 1080},
             color_scheme="dark",
         )
+        # Bound navigation and script evaluation so a stuck region cannot hang the slow pool.
+        context.set_default_navigation_timeout(60_000)
+        context.set_default_timeout(30_000)
         page = context.new_page()
         stealth_sync(page)
 

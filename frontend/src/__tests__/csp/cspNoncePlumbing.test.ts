@@ -147,18 +147,18 @@ describe('middleware matcher exclusions', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. Google Fonts domains are preserved in CSP
+// 5. Runtime Google Fonts domains are not required in CSP
 // ---------------------------------------------------------------------------
 
-describe('Google Fonts domains in CSP', () => {
-  it('style-src includes https://fonts.googleapis.com', () => {
+describe('local font CSP', () => {
+  it('style-src does not allow https://fonts.googleapis.com', () => {
     const csp = getCsp();
-    expect(csp).toContain('https://fonts.googleapis.com');
+    expect(csp).not.toContain('https://fonts.googleapis.com');
   });
 
-  it('font-src includes https://fonts.gstatic.com', () => {
+  it('font-src does not allow https://fonts.gstatic.com', () => {
     const csp = getCsp();
-    expect(csp).toContain('https://fonts.gstatic.com');
+    expect(csp).not.toContain('https://fonts.gstatic.com');
   });
 });
 
@@ -178,9 +178,9 @@ describe('production CSP directive completeness', () => {
     expect(csp).not.toMatch(/script-src [^;]*'nonce-/);
   });
 
-  it('has style-src with unsafe-inline and fonts.googleapis.com', () => {
+  it('has style-src with hydration-compatible inline styles only', () => {
     expect(csp).toMatch(/style-src [^;]*'unsafe-inline'/);
-    expect(csp).toMatch(/style-src [^;]*https:\/\/fonts\.googleapis\.com/);
+    expect(csp).not.toMatch(/style-src [^;]*https:\/\/fonts\.googleapis\.com/);
   });
 
   it('has worker-src self blob:', () => {

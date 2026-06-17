@@ -69,6 +69,12 @@ class DashboardData(TypedDict, total=False):
     sar_scenes: List[Dict[str, Any]]
     sar_anomalies: List[Dict[str, Any]]
     sar_aoi_coverage: List[Dict[str, Any]]
+    road_corridor_trends: Dict[str, Any]
+    malware_threats: Dict[str, Any]
+    cyber_threats: Dict[str, Any]
+    scm_suppliers: Dict[str, Any]
+    telegram_osint: Dict[str, Any]
+    gt_risk: Dict[str, Any]
 
 
 # In-memory store
@@ -119,6 +125,18 @@ latest_data: DashboardData = {
     "sar_scenes": [],
     "sar_anomalies": [],
     "sar_aoi_coverage": [],
+    "road_corridor_trends": {"updated_at": None, "corridors": []},
+    "malware_threats": {"threats": [], "total": 0, "timestamp": None},
+    "cyber_threats": {"threats": [], "stats": {}},
+    "scm_suppliers": {"suppliers": [], "total": 0, "critical_count": 0},
+    "telegram_osint": {"posts": [], "total": 0, "geolocated": 0, "timestamp": None},
+    "gt_risk": {
+        "enabled": False,
+        "heatmap": {"type": "FeatureCollection", "features": []},
+        "clusters": [],
+        "processed": 0,
+        "timestamp": None,
+    },
 }
 
 # Per-source freshness timestamps
@@ -230,27 +248,52 @@ _active_layers_version: int = 0
 def bump_active_layers_version() -> None:
     """Increment the active-layer version when frontend toggles change response shape."""
     global _active_layers_version
-    _active_layers_version += 1
+    with _data_lock:
+        _active_layers_version += 1
 
 
 def get_active_layers_version() -> int:
     """Return the current active-layer version (for ETag generation)."""
-    return _active_layers_version
+    with _data_lock:
+        return _active_layers_version
 
 
 def get_latest_data_subset(*keys: str) -> DashboardData:
     """Return a deep snapshot of only the requested top-level keys.
 
-    This avoids cloning the entire dashboard store for endpoints that only need
-    a small tier-specific subset.  Deep copy ensures callers cannot mutate
-    nested structures (e.g. individual flight dicts) and affect the live store.
+    Grabs references under the lock, then deep-copies outside it so fetcher
+    writers are not blocked for the duration of a large clone (#375).
     """
     with _data_lock:
-        snap: DashboardData = {}
-        for key in keys:
-            value = latest_data.get(key)
-            snap[key] = copy.deepcopy(value)
-        return snap
+        items = [(key, latest_data.get(key)) for key in keys]
+    snap: DashboardData = {}
+    for key, value in items:
+        snap[key] = copy.deepcopy(value)
+    return snap
+
+
+def get_latest_data_deepcopy_snapshot() -> DashboardData:
+    """Deep-copy the full dashboard for /api/health and legacy /api/live-data.
+
+    The per-value deepcopy runs OUTSIDE ``_data_lock`` so a large clone cannot
+    block fetcher writers (#375). The store contract is replace-don't-mutate,
+    but a writer that mutates a nested object in place (e.g. a live bridge
+    updating an entry that is also published in this store) can race the
+    deepcopy and raise ``RuntimeError: dictionary changed size during
+    iteration`` — surfacing a 500 on the health/live-data path. The racing
+    mutation window is tiny, so retry a few times rather than fail; a fresh
+    attempt almost always lands on a quiescent moment. Defense-in-depth on top
+    of fixing the offending writers, not a substitute for it.
+    """
+    attempts = 4
+    for attempt in range(attempts):
+        with _data_lock:
+            items = list(latest_data.items())
+        try:
+            return {key: copy.deepcopy(value) for key, value in items}
+        except RuntimeError:
+            if attempt == attempts - 1:
+                raise
 
 
 def get_latest_data_subset_refs(*keys: str) -> DashboardData:
@@ -320,6 +363,13 @@ active_layers: dict[str, bool] = {
     "ai_intel": True,
     "crowdthreat": False,
     "sar": True,
+    "road_corridor_trends": False,
+    "malware_c2": False,
+    "submarine_cables": False,
+    "scm_suppliers": False,
+    "cyber_threats": False,
+    "telegram_osint": True,
+    "gt_risk": False,
 }
 
 

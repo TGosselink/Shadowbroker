@@ -27,6 +27,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    git \
     tor \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
@@ -45,7 +46,7 @@ COPY uv.lock /workspace/uv.lock
 COPY backend/pyproject.toml /workspace/backend/pyproject.toml
 
 # Install Python dependencies using the lockfile
-RUN cd /workspace/backend && uv sync --frozen --no-dev \
+RUN cd /workspace/backend && uv sync --frozen --no-dev --extra road-corridor \
     && playwright install --with-deps chromium
 
 # Copy backend source code
@@ -72,7 +73,7 @@ ENV PRIVACY_CORE_LIB=/app/libprivacy_core.so
 # Create a non-root user for security
 # Grant write access to /app so the auto-updater can extract files
 # Pre-create /app/data so mounted volumes inherit correct ownership
-RUN adduser --system --uid 1001 backenduser \
+RUN adduser --system --uid 1001 --home /app backenduser \
     && mkdir -p /app/data \
     && chown -R backenduser /app \
     && chmod -R u+w /app
