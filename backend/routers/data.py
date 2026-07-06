@@ -396,6 +396,52 @@ async def get_selected_ship_trail(mmsi: int, request: Request):  # noqa: ARG001
     return {"id": mmsi, "trail": get_vessel_trail(mmsi)}
 
 
+@router.get("/api/aviation/datalink/status")
+@limiter.limit("60/minute")
+async def aviation_datalink_status(request: Request):  # noqa: ARG001
+    from services.fetchers.airframes import get_datalink_status
+
+    return get_datalink_status()
+
+
+@router.get("/api/aviation/datalink/messages")
+@limiter.limit("240/minute")
+async def aviation_datalink_messages(
+    request: Request,  # noqa: ARG001
+    icao24: str = Query("", description="ICAO24 hex for the aircraft"),
+    registration: str = Query("", description="Tail / registration number"),
+    callsign: str = Query("", description="Optional callsign filter"),
+    live: bool = Query(
+        False,
+        description="When true, fetch from Airframes if cache has no messages (slower)",
+    ),
+):
+    from services.fetchers.airframes import lookup_datalink_messages
+
+    return lookup_datalink_messages(
+        icao24=icao24,
+        registration=registration,
+        callsign=callsign,
+        allow_live=live,
+    )
+
+
+@router.get("/api/sigint/meshtastic/status")
+@limiter.limit("120/minute")
+async def meshtastic_map_status(request: Request):  # noqa: ARG001
+    from services.fetchers.meshtastic_map import get_meshtastic_map_status
+
+    return get_meshtastic_map_status()
+
+
+@router.post("/api/sigint/meshtastic/scan", dependencies=[Depends(require_local_operator)])
+@limiter.limit("3/hour")
+async def meshtastic_planet_scan(request: Request):  # noqa: ARG001
+    from services.fetchers.meshtastic_map import start_meshtastic_planet_scan
+
+    return start_meshtastic_planet_scan()
+
+
 @router.post("/api/viewport")
 @limiter.limit("60/minute")
 async def update_viewport(vp: ViewportUpdate, request: Request):  # noqa: ARG001
@@ -498,12 +544,13 @@ def _run_prediction_markets_disable() -> None:
 async def update_layers(update: LayerUpdate, request: Request):
     """Receive frontend layer toggle state. Starts/stops streams accordingly."""
     from services.fetchers._store import active_layers, bump_active_layers_version, is_any_active
+    from services.layer_enable_refresh import refresh_newly_enabled_layers, snapshot_active_layers
+
+    layers_before = snapshot_active_layers()
     old_ships = is_any_active("ships_military", "ships_cargo", "ships_civilian", "ships_passenger", "ships_tracked_yachts")
     old_mesh = is_any_active("sigint_meshtastic")
     old_aprs = is_any_active("sigint_aprs")
     old_viirs = is_any_active("viirs_nightlights")
-    old_datacenters = is_any_active("datacenters")
-    old_fishing = is_any_active("fishing_activity")
     changed = False
     for key, value in update.layers.items():
         if key in active_layers:
@@ -516,8 +563,6 @@ async def update_layers(update: LayerUpdate, request: Request):
     new_mesh = is_any_active("sigint_meshtastic")
     new_aprs = is_any_active("sigint_aprs")
     new_viirs = is_any_active("viirs_nightlights")
-    new_datacenters = is_any_active("datacenters")
-    new_fishing = is_any_active("fishing_activity")
     if old_ships and not new_ships:
         from services.ais_stream import stop_ais_stream
         stop_ais_stream()
@@ -561,16 +606,7 @@ async def update_layers(update: LayerUpdate, request: Request):
     if not old_viirs and new_viirs:
         _queue_viirs_change_refresh()
         logger.info("VIIRS change refresh queued (layer enabled)")
-    if not old_datacenters and new_datacenters:
-        from services.fetchers.infrastructure import fetch_datacenters
-
-        fetch_datacenters()
-        logger.info("Datacenters loaded (layer enabled)")
-    if not old_fishing and new_fishing:
-        from services.fetchers.geo import fetch_fishing_activity
-
-        fetch_fishing_activity()
-        logger.info("Fishing activity refresh queued (layer enabled)")
+    refresh_newly_enabled_layers(layers_before)
     return {"status": "ok"}
 
 

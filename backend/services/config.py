@@ -370,8 +370,12 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     try:
-        from services.api_settings import load_persisted_api_keys_into_environ
+        from services.api_settings import (
+            load_persisted_api_keys_into_environ,
+            load_persisted_openclaw_into_environ,
+        )
         load_persisted_api_keys_into_environ()
+        load_persisted_openclaw_into_environ()
     except Exception:
         pass
     return Settings()

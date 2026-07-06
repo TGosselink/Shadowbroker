@@ -810,9 +810,11 @@ def _classify_and_publish(all_adsb_flights):
                     seen_hexes.add(hex_id)
 
         tracked_hexes = {t.get("icao24", "").lower() for t in tracked_snapshot}
+        private_hexes = {t.get("icao24", "").lower() for t in private_jets_snapshot}
+        priority_hexes = tracked_hexes | private_hexes
         stale_keys = []
         for k, v in flight_trails.items():
-            cutoff = now_ts - 1800 if k in tracked_hexes else now_ts - 300
+            cutoff = now_ts - 14400 if k in priority_hexes else now_ts - 300
             if v["last_seen"] < cutoff:
                 stale_keys.append(k)
         for k in stale_keys:

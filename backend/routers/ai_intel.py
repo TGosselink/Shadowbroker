@@ -1687,8 +1687,52 @@ async def agent_tool_manifest(request: Request):
                     "radius_km": {"type": "float", "required": False, "description": "Context radius in km (default 100, max 1000)"},
                     "limit": {"type": "integer", "required": False, "description": "Max records per evidence group (default 10, max 50)"},
                 },
-                "returns": "{status, claim_level, entity, center, radius_km, signals, evidence: {proximate_entities, context_layers}, recommended_next}",
+                "returns": "{status, claim_level, entity, center, radius_km, signals, movement, evidence: {proximate_entities, context_layers}, recommended_next}",
                 "example": {"cmd": "correlate_entity", "args": {"entity_type": "aircraft", "callsign": "AF1", "radius_km": 150}},
+            },
+            {
+                "name": "get_entity_trail",
+                "type": "read",
+                "description": "Resolve an aircraft or vessel and return its observed movement trail, route enrichment (from entity fields or route database), bearing/heading, and optional ACARS datalink hints. Trails accumulate while ShadowBroker is running.",
+                "parameters": {
+                    "query": {"type": "string", "required": False, "description": "Natural-language name, owner, callsign, tail, MMSI, or vessel name"},
+                    "entity_type": {"type": "string", "required": False, "description": "Optional type hint: aircraft or ship"},
+                    "callsign": {"type": "string", "required": False, "description": "Aircraft or vessel callsign"},
+                    "registration": {"type": "string", "required": False, "description": "Aircraft tail number / registration"},
+                    "icao24": {"type": "string", "required": False, "description": "Aircraft ICAO24 hex identifier"},
+                    "mmsi": {"type": "string", "required": False, "description": "Ship MMSI"},
+                    "imo": {"type": "string", "required": False, "description": "Ship IMO number"},
+                    "name": {"type": "string", "required": False, "description": "Known aircraft/vessel name"},
+                    "owner": {"type": "string", "required": False, "description": "Owner or operator"},
+                    "max_points": {"type": "integer", "required": False, "description": "Max trail points returned (default 80, max 200)"},
+                    "include_datalink": {"type": "boolean", "required": False, "description": "Include ACARS/VDL summaries when available (default true)"},
+                },
+                "returns": "{status, entity, trail: [{lat,lng,alt_ft,ts}], route, movement, datalink_hints, notes}",
+                "example": {"cmd": "get_entity_trail", "args": {"registration": "N424PX", "icao24": "a50bd6"}},
+            },
+            {
+                "name": "get_entity_profile",
+                "type": "read",
+                "description": "One-shot aircraft or vessel dossier: identity, VIP/plane-alert metadata, position, trail, route, holding/emissions, ACARS datalink, nearby correlations/jamming/SAR, and related news.",
+                "parameters": {
+                    "query": {"type": "string", "required": False, "description": "Natural-language name, owner, callsign, tail, MMSI, or vessel name"},
+                    "entity_type": {"type": "string", "required": False, "description": "Optional type hint: aircraft or ship"},
+                    "callsign": {"type": "string", "required": False, "description": "Aircraft or vessel callsign"},
+                    "registration": {"type": "string", "required": False, "description": "Aircraft tail number / registration"},
+                    "icao24": {"type": "string", "required": False, "description": "Aircraft ICAO24 hex identifier"},
+                    "mmsi": {"type": "string", "required": False, "description": "Ship MMSI"},
+                    "imo": {"type": "string", "required": False, "description": "Ship IMO number"},
+                    "name": {"type": "string", "required": False, "description": "Known aircraft/vessel name"},
+                    "owner": {"type": "string", "required": False, "description": "Owner or operator"},
+                    "max_trail_points": {"type": "integer", "required": False, "description": "Max trail points (default 80)"},
+                    "include_datalink": {"type": "boolean", "required": False, "description": "Include ACARS summaries (default true)"},
+                    "include_datalink_messages": {"type": "boolean", "required": False, "description": "Include full summarized datalink messages (default false)"},
+                    "include_news": {"type": "boolean", "required": False, "description": "Search news for owner/operator (default true)"},
+                    "include_nearby_context": {"type": "boolean", "required": False, "description": "Include nearby correlations, GPS jamming, SAR (default true)"},
+                    "context_radius_km": {"type": "float", "required": False, "description": "Radius for nearby context (default 120 km)"},
+                },
+                "returns": "{status, identity, position, trail, route, movement, aircraft_state, datalink, nearby_context, related_news, recommended_next}",
+                "example": {"cmd": "get_entity_profile", "args": {"registration": "N424PX", "owner": "Katzman"}},
             },
             {
                 "name": "search_telemetry",
@@ -2413,7 +2457,15 @@ async def api_capabilities(request: Request):
                 },
                 "correlate_entity": {
                     "args": {"query": "str (optional)", "entity_type": "str (optional)", "callsign": "str (optional)", "registration": "str (optional)", "icao24": "str (optional)", "mmsi": "str (optional)", "imo": "str (optional)", "name": "str (optional)", "owner": "str (optional)", "radius_km": "float (default 100)", "limit": "int (default 10)"},
-                    "description": "Resolve an entity and return nearby context/correlation evidence. Co-location is reported as a lead, not proof.",
+                    "description": "Resolve an entity and return nearby context/correlation evidence plus observed movement trail summary. Co-location is reported as a lead, not proof.",
+                },
+                "get_entity_trail": {
+                    "args": {"query": "str (optional)", "entity_type": "str (optional)", "callsign": "str (optional)", "registration": "str (optional)", "icao24": "str (optional)", "mmsi": "str (optional)", "imo": "str (optional)", "name": "str (optional)", "owner": "str (optional)", "max_points": "int (default 80)", "include_datalink": "bool (default true)"},
+                    "description": "Observed aircraft/vessel trail, route enrichment, bearing, and ACARS hints. Use instead of Time Machine for live-session history.",
+                },
+                "get_entity_profile": {
+                    "args": {"query": "str (optional)", "entity_type": "str (optional)", "registration": "str (optional)", "icao24": "str (optional)", "owner": "str (optional)", "include_datalink": "bool (default true)", "include_news": "bool (default true)", "include_nearby_context": "bool (default true)"},
+                    "description": "Preferred one-shot dossier for aircraft/vessels — identity, trail, route, VIP tags, datalink, jamming/correlations, news.",
                 },
                 "search_telemetry": {
                     "args": {"query": "str", "layers": "list[str] (optional)", "limit": "int (default 25)"},
@@ -2935,6 +2987,12 @@ def _write_env_value(key: str, value: str) -> None:
 
     # Also set in current process env so Settings picks it up
     os.environ[key] = value
+
+    try:
+        from services.api_settings import persist_openclaw_env_value
+        persist_openclaw_env_value(key, value)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

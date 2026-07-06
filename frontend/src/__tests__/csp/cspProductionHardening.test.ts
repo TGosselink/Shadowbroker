@@ -13,19 +13,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
-import { middleware, config as middlewareConfig } from '@/middleware';
+import { proxy, config as proxyConfig } from '@/proxy';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function callMiddleware(path = '/') {
+function callProxy(path = '/') {
   const req = new NextRequest(`http://localhost${path}`, { method: 'GET' });
-  return middleware(req);
+  return proxy(req);
 }
 
 function getCsp(path = '/'): string {
-  return callMiddleware(path).headers.get('Content-Security-Policy') ?? '';
+  return callProxy(path).headers.get('Content-Security-Policy') ?? '';
 }
 
 /** Extract a single CSP directive by name. */
@@ -36,7 +36,7 @@ function getDirective(name: string, csp?: string): string {
 }
 
 function matcherExcludes(path: string): boolean {
-  const pattern = middlewareConfig.matcher[0];
+  const pattern = proxyConfig.matcher[0];
   const re = new RegExp(`^${pattern}$`);
   return !re.test(path);
 }

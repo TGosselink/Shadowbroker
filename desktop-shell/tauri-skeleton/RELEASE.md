@@ -52,7 +52,7 @@ See [RELEASE_INPUTS.md](./RELEASE_INPUTS.md) for the plain-language answer to
 
 1. Generates the desktop icon set in `src-tauri/icons/`
 2. Stages a desktop-only frontend export tree that omits Next server-only
-   routes/middleware (`src/app/api`, `src/middleware.ts`)
+   routes/proxy (`src/app/api`, `src/proxy.ts`)
 3. Stages a managed backend runtime bundle into `src-tauri/backend-runtime/`
 4. Builds the frontend export with `NEXT_OUTPUT=export`
 5. Copies `frontend/out` into `src-tauri/companion-www/`

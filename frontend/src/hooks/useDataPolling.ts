@@ -295,13 +295,26 @@ export function useDataPolling() {
       }, VIEWPORT_FAST_REFETCH_DEBOUNCE_MS);
     };
 
-    // When a layer toggle fires, immediately refetch slow data so the user
-    // doesn't wait up to 120s for power plants / GDELT / etc. to appear.
+    // When a layer toggle fires, refetch live tiers immediately and retry a few
+    // times so network-heavy on-enable fetches (FIRMS, PSK, …) can finish in the
+    // background without blocking POST /api/layers on the single API worker.
     const onLayerToggle = () => {
-      slowEtag.current = null;           // invalidate ETag → guarantees fresh payload
+      slowEtag.current = null;
+      fastEtag.current = null;
       if (slowTimerId) clearTimeout(slowTimerId);
       slowTimerId = null;
-      fetchSlowData();
+      void fetchFastData();
+      void fetchSlowData();
+      const retryDelaysMs = [1000, 2500, 5000];
+      for (const delay of retryDelaysMs) {
+        setTimeout(() => {
+          if (_pollingPaused) return;
+          slowEtag.current = null;
+          fastEtag.current = null;
+          void fetchSlowData();
+          void fetchFastData();
+        }, delay);
+      }
     };
     window.addEventListener(LAYER_TOGGLE_EVENT, onLayerToggle);
     window.addEventListener(VIEWPORT_COMMITTED_EVENT, queueViewportFastRefetch);

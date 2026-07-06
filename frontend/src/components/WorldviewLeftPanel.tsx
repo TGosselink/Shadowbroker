@@ -44,6 +44,7 @@ import {
   Radar,
   MapPin,
   Truck,
+  RefreshCw,
 } from 'lucide-react';
 import RoadCorridorLayerControls from '@/components/RoadCorridorLayerControls';
 import { API_BASE } from '@/lib/api';
@@ -143,8 +144,61 @@ import type {
   KiwiSDR,
   Scanner,
   TrackedFlight,
+  DashboardData,
 } from '@/types/dashboard';
-import { useDataSnapshot } from '@/hooks/useDataStore';
+import { useDataKeys } from '@/hooks/useDataStore';
+
+/** Keys the layer panel reads — avoids re-rendering on unrelated fast-poll keys. */
+const WORLDVIEW_PANEL_DATA_KEYS = [
+  'ships',
+  'sigint_totals',
+  'sigint',
+  'cctv_total',
+  'cctv',
+  'satnogs_total',
+  'satnogs_stations',
+  'tinygs_total',
+  'tinygs_satellites',
+  'tracked_flights',
+  'commercial_flights',
+  'private_flights',
+  'private_jets',
+  'military_flights',
+  'gps_jamming',
+  'fishing_activity',
+  'satellite_source',
+  'satellite_analysis',
+  'satellites',
+  'road_corridor_trends',
+  'earthquakes',
+  'firms_fires',
+  'ukraine_alerts',
+  'weather_alerts',
+  'volcanoes',
+  'air_quality',
+  'sar_anomalies',
+  'sar_scenes',
+  'uap_sightings',
+  'wastewater',
+  'datacenters',
+  'internet_outages',
+  'power_plants',
+  'military_bases',
+  'trains',
+  'malware_threats',
+  'scm_suppliers',
+  'cyber_threats',
+  'kiwisdr',
+  'psk_reporter',
+  'scanners',
+  'frontlines',
+  'gdelt',
+  'telegram_osint',
+  'crowdthreat',
+  'correlations',
+  'gt_risk',
+  'freshness',
+] as const satisfies readonly (keyof DashboardData)[];
 
 // ---------------------------------------------------------------------------
 // ScannerTracker — in-app audio player for tracked police scanner systems
@@ -699,7 +753,7 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
   onOpenSarAoiEditor?: () => void;
   viewBoundsRef?: React.RefObject<{ south: number; west: number; north: number; east: number } | null>;
 }) {
-  const data = useDataSnapshot() as import('@/types/dashboard').DashboardData;
+  const data = useDataKeys(WORLDVIEW_PANEL_DATA_KEYS) as DashboardData;
   const { t } = useTranslation();
   const [internalMinimized, setInternalMinimized] = useState(true);
   const isMinimized = isMinimizedProp !== undefined ? isMinimizedProp : internalMinimized;
@@ -711,7 +765,10 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
   const { theme, toggleTheme, hudColor, cycleHudColor } = useTheme();
   const [gibsPlaying, setGibsPlaying] = useState(false);
   const [potusEnabled, setPotusEnabled] = useState(true);
+  const [meshtasticScanning, setMeshtasticScanning] = useState(false);
+  const [meshtasticScanMessage, setMeshtasticScanMessage] = useState('');
   const gibsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const meshtasticScanPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // SAR mode chooser — prompts the first time the user enables the SAR
   // layer, remembers the choice, and auto-detects server-side Mode B.
@@ -797,7 +854,9 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
         });
         if (!res.ok || cancelled) return;
         const body = await res.json();
-        const modeBOn = Boolean(body?.products?.enabled);
+        const modeBOn = Boolean(
+          body?.products?.fully_configured ?? body?.products?.enabled,
+        );
         if (cancelled) return;
         if (modeBOn && sarChoice !== 'b_active') {
           try {
@@ -930,6 +989,67 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
     }
     return { meshtasticCount: mesh, aprsCount: aprs };
   }, [data?.sigint, data?.sigint_totals]);
+
+  const stopMeshtasticScanPoll = useCallback(() => {
+    if (meshtasticScanPollRef.current) {
+      clearInterval(meshtasticScanPollRef.current);
+      meshtasticScanPollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => stopMeshtasticScanPoll(), [stopMeshtasticScanPoll]);
+
+  const scanMeshtasticPlanet = useCallback(
+    async (event: React.MouseEvent) => {
+      event.stopPropagation();
+      if (meshtasticScanning) return;
+
+      setMeshtasticScanning(true);
+      setMeshtasticScanMessage('Starting global node scan…');
+      stopMeshtasticScanPoll();
+
+      try {
+        const res = await fetch(`${API_BASE}/api/sigint/meshtastic/scan`, { method: 'POST' });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok || json.ok === false) {
+          setMeshtasticScanMessage(
+            typeof json.status === 'string' ? json.status : 'Meshtastic scan could not start.',
+          );
+          setMeshtasticScanning(false);
+          return;
+        }
+
+        setMeshtasticScanMessage('Scanning planet (~90s)…');
+        let polls = 0;
+        meshtasticScanPollRef.current = setInterval(async () => {
+          polls += 1;
+          try {
+            const statusRes = await fetch(`${API_BASE}/api/sigint/meshtastic/status`);
+            if (!statusRes.ok) return;
+            const status = await statusRes.json();
+            if (!status.scan_in_progress) {
+              stopMeshtasticScanPoll();
+              setMeshtasticScanning(false);
+              const count = Number(status.node_count || 0);
+              setMeshtasticScanMessage(
+                count > 0 ? `Scan complete — ${count.toLocaleString()} nodes on map.` : 'Scan complete.',
+              );
+            } else if (polls >= 40) {
+              stopMeshtasticScanPoll();
+              setMeshtasticScanning(false);
+              setMeshtasticScanMessage('Scan still running in background. Count will update when finished.');
+            }
+          } catch {
+            // keep polling until timeout
+          }
+        }, 3000);
+      } catch {
+        setMeshtasticScanning(false);
+        setMeshtasticScanMessage('Meshtastic scan request failed.');
+      }
+    },
+    [meshtasticScanning, stopMeshtasticScanPoll],
+  );
 
   const cctvCount = Number(data?.cctv_total || data?.cctv?.length || 0);
   const satnogsCount = Number(data?.satnogs_total || data?.satnogs_stations?.length || 0);
@@ -1871,6 +1991,31 @@ const WorldviewLeftPanel = React.memo(function WorldviewLeftPanel({
                                     )}
                                   </div>
                                 </div>
+                                {active && layer.id === 'sigint_meshtastic' && (
+                                  <div
+                                    className="ml-7 mt-2 flex flex-col gap-1.5"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={scanMeshtasticPlanet}
+                                      disabled={meshtasticScanning}
+                                      className="inline-flex items-center gap-1.5 self-start px-2 py-1 text-[10px] font-mono tracking-wider border border-cyan-500/40 text-cyan-400 hover:bg-cyan-950/30 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                                      title="Re-fetch all Meshtastic node positions from the global map API"
+                                    >
+                                      <RefreshCw
+                                        size={11}
+                                        className={meshtasticScanning ? 'animate-spin' : ''}
+                                      />
+                                      {meshtasticScanning ? 'SCANNING…' : 'SCAN PLANET'}
+                                    </button>
+                                    {meshtasticScanMessage ? (
+                                      <span className="text-[10px] font-mono text-cyan-500/80 leading-snug">
+                                        {meshtasticScanMessage}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                )}
                                 {/* GIBS Imagery inline controls */}
                                 {active &&
                                   layer.id === 'gibs_imagery' &&

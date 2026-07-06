@@ -1,5 +1,5 @@
 /**
- * Phase 5F-A: CSP nonce plumbing middleware.
+ * Phase 5F-A: CSP nonce plumbing proxy.
  *
  * Generates a per-request cryptographic nonce and emits a dynamic
  * Content-Security-Policy header for document (page) responses.
@@ -36,7 +36,7 @@ function buildCsp(nonce: string, strictScripts = false): string {
   return directives.join('; ');
 }
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
 
   // Forward a nonce for staged CSP support. Strict script-src is opt-in until

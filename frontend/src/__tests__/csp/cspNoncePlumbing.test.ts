@@ -5,7 +5,7 @@
  * 1. Document CSP remains hydration-safe for the Next.js runtime
  * 2. CSP is deterministic across repeated requests
  * 3. next.config.ts no longer owns a static CSP header
- * 4. Middleware does not break API/static routes (matcher exclusion)
+ * 4. Proxy does not break API/static routes (matcher exclusion)
  * 5. Google Fonts domains are preserved in CSP
  * 6. Production CSP preserves required directives
  */
@@ -13,26 +13,26 @@
 import { describe, expect, it } from 'vitest';
 import { NextRequest } from 'next/server';
 
-import { middleware, config as middlewareConfig } from '@/middleware';
+import { proxy, config as proxyConfig } from '@/proxy';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Call middleware with a fake document request and return the response. */
-function callMiddleware(path = '/') {
+/** Call proxy with a fake document request and return the response. */
+function callProxy(path = '/') {
   const req = new NextRequest(`http://localhost${path}`, { method: 'GET' });
-  return middleware(req);
+  return proxy(req);
 }
 
-/** Extract the CSP header string from a middleware response. */
+/** Extract the CSP header string from a proxy response. */
 function getCsp(path = '/'): string {
-  return callMiddleware(path).headers.get('Content-Security-Policy') ?? '';
+  return callProxy(path).headers.get('Content-Security-Policy') ?? '';
 }
 
-/** Check whether the middleware matcher regex excludes a given path. */
+/** Check whether the proxy matcher regex excludes a given path. */
 function matcherExcludes(path: string): boolean {
-  const pattern = middlewareConfig.matcher[0];
+  const pattern = proxyConfig.matcher[0];
   // Next.js wraps the matcher in ^/<pattern>$ for path matching.
   // We replicate the essential check: the negative-lookahead prefix groups.
   const re = new RegExp(`^${pattern}$`);
@@ -55,7 +55,7 @@ describe('hydration-safe CSP header', () => {
     expect(csp).toMatch(/script-src [^;]*'unsafe-inline'/);
   });
 
-  it('middleware still returns a CSP header for document requests', () => {
+  it('proxy still returns a CSP header for document requests', () => {
     const csp = getCsp();
     expect(csp).toContain("default-src 'self'");
     expect(csp).toContain("script-src 'self'");
@@ -117,10 +117,10 @@ describe('next.config.ts CSP removal', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. Middleware does not break API/static routes
+// 4. Proxy does not break API/static routes
 // ---------------------------------------------------------------------------
 
-describe('middleware matcher exclusions', () => {
+describe('proxy matcher exclusions', () => {
   it('excludes /api paths', () => {
     expect(matcherExcludes('/api/mesh/events')).toBe(true);
   });

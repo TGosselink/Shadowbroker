@@ -75,7 +75,7 @@ The release build now does the full packaging pipeline:
 
 1. Generates branded icons in `src-tauri/icons/`
 2. Stages a desktop-only frontend export tree that omits Next server-only
-   routes/middleware (`src/app/api`, `src/middleware.ts`)
+   routes/proxy (`src/app/api`, `src/proxy.ts`)
 3. Stages a managed backend runtime bundle from `backend/` into
    `src-tauri/backend-runtime/`
 4. Builds the frontend export with `NEXT_OUTPUT=export`

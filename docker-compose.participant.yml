@@ -17,6 +17,9 @@ services:
       WORMHOLE_STARTUP_DEADLINE_S: "90"
       GT_ANALYTICS_ENABLED: "false"
       GT_ANALYTICS_PROFILE: "lean"
+      # Lean 1-vCPU nodes: fewer fetch worker threads reduces scheduler contention.
+      SHADOWBROKER_FETCH_WORKERS: "4"
+      SHADOWBROKER_HEAVY_FETCH_WORKERS: "1"
     deploy:
       resources:
         limits:
