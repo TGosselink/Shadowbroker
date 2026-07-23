@@ -46,7 +46,6 @@ The project does not introduce new surveillance capabilities — it aggregates a
 
 ShadowBroker includes an optional **Shodan connector** for operator-supplied API access (`SHODAN_API_KEY`) and a **Recon Toolkit** panel for keyless OSINT lookups. Both run **server-side only**: the browser calls your self-hosted `/api/osint/*` and `/api/tools/shodan/*` routes; outbound requests are made by the backend after SSRF validation. Recon requires **local-operator** access (same trust model as layer toggles and admin routes). Shodan results render as a separate map overlay and remain subject to Shodan’s terms of service.
 
-> **Not included:** embedded live-news YouTube grids or a built-in Gemini AI analyst panel — use the **OpenClaw / agent channel** for AI-assisted analysis instead.
 
 </details>
 

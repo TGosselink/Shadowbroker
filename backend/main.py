@@ -1489,9 +1489,21 @@ def _refresh_node_peer_store(*, now: float | None = None) -> dict[str, Any]:
         push_records = [record for record in push_records if _is_private_infonet_transport(record.transport)]
     swarm_sync_peer_count = len([record for record in sync_records if str(record.source or "") == "swarm"])
     swarm_push_peer_count = len([record for record in push_records if str(record.source or "") == "swarm"])
+    swarm_pull_ok = bool(swarm_pull.get("ok")) and not bool(swarm_pull.get("skipped"))
+    if swarm_pull_ok or manifest is not None or swarm_sync_peer_count > 0:
+        bootstrap_state = "ready"
+        bootstrap_detail = "Bootstrap peer discovery is ready."
+    elif bootstrap_seed_peers:
+        bootstrap_state = "connecting"
+        bootstrap_detail = "Bootstrap seeds are configured; local node stays active and retries in the background."
+    else:
+        bootstrap_state = "solo"
+        bootstrap_detail = "No bootstrap seeds configured; local node is running in solo mode."
     snapshot = {
         "node_mode": mode,
         "private_transport_required": private_transport_required,
+        "bootstrap_state": bootstrap_state,
+        "bootstrap_detail": bootstrap_detail,
         "skipped_clearnet_peer_count": skipped_clearnet_peers,
         "pruned_clearnet_peer_count": pruned_clearnet_peers,
         "manifest_loaded": manifest is not None,

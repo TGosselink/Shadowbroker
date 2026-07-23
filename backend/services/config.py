@@ -39,7 +39,10 @@ class Settings(BaseSettings):
     MESH_PUBLIC_PEER_URL: str = ""
     # Bootstrap seeds are discovery hints, not authoritative network roots.
     # Nodes promote healthy discovered peers from the store/manifest over time.
-    MESH_BOOTSTRAP_SEED_PEERS: str = "http://gqpbunqbgtkcqilvclm3xrkt3zowjyl3s62kkktvojgvxzizamvbrqid.onion:8000"
+    MESH_BOOTSTRAP_SEED_PEERS: str = ""
+    # Optional comma-separated override for the public fleet's bundled onion seeds.
+    # This lets seed rotation/addition ship as env/config without weakening private sync.
+    MESH_FLEET_SEED_PEERS: str = ""
     # Legacy name kept for older compose/.env files.
     MESH_DEFAULT_SYNC_PEERS: str = ""
     # Infonet/Wormhole must fail closed to private transports by default.
