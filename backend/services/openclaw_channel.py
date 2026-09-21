@@ -53,6 +53,7 @@ READ_COMMANDS = frozenset({
     "get_telemetry",
     "get_slow_telemetry",
     "get_summary",
+    "get_fetch_health",
     "get_report",
     "get_layer_slice",
     "find_flights",
@@ -746,6 +747,10 @@ def _dispatch_command(cmd: str, args: dict[str, Any]) -> dict[str, Any]:
         summary = get_telemetry_summary()
         return {"ok": True, "data": summary, "version": summary.get("version")}
 
+    if cmd == "get_fetch_health":
+        from services.fetch_health import get_agent_health_snapshot
+        return {"ok": True, "data": get_agent_health_snapshot()}
+
     if cmd == "get_layer_slice":
         from services.telemetry import get_layer_slice
         layers = args.get("layers") or []
@@ -1357,7 +1362,9 @@ def _dispatch_command(cmd: str, args: dict[str, Any]) -> dict[str, Any]:
         if not layer or not items:
             return {"ok": False, "detail": "layer and items required"}
         from services.ai_intel_store import inject_layer_data
-        result = inject_layer_data(layer, items)
+        result = inject_layer_data(layer, items, mode=args.get("mode", "append"))
+        if not result.get("ok"):
+            return result
         return {"ok": True, "data": result}
 
     if cmd == "create_layer":

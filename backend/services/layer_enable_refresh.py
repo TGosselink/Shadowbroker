@@ -10,13 +10,25 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Inline — local DB / static files only.
+# Inline — tiny local/static loads (ms).
 _INSTANT_LAYER_KEYS: frozenset[str] = frozenset(
-    {"cctv", "power_plants", "datacenters"}
+    {"power_plants", "datacenters"}
 )
-# Background — network-bound; may take seconds.
+# Background — network-bound OR large local scans (full CCTV SELECT can stall
+# the single uvicorn worker if run inline on enable).
 _SLOW_LAYER_KEYS: frozenset[str] = frozenset(
-    {"firms", "psk_reporter", "fishing_activity"}
+    {
+        "cctv",
+        "firms",
+        "psk_reporter",
+        "fishing_activity",
+        "uap_sightings",
+        "malware_c2",
+        "cyber_threats",
+        "scm_suppliers",
+        "telegram_osint",
+        "gt_risk",
+    }
 )
 
 
@@ -33,12 +45,6 @@ def _was_off_now_on(before: dict[str, bool], key: str) -> bool:
 
 
 def _instant_fetch(key: str) -> None:
-    if key == "cctv":
-        from services.fetchers.infrastructure import fetch_cctv
-
-        fetch_cctv()
-        logger.info("CCTV loaded (layer enabled)")
-        return
     if key == "power_plants":
         from services.fetchers.infrastructure import fetch_power_plants
 
@@ -55,6 +61,19 @@ def _instant_fetch(key: str) -> None:
 
 
 def _slow_fetch(key: str) -> None:
+    if key == "cctv":
+        from services.cctv_pipeline import get_camera_count, run_all_ingestors
+        from services.fetchers.infrastructure import fetch_cctv
+
+        # A fresh checkout can have an empty SQLite catalog even though the
+        # public camera feeds are available. Seed it the first time CCTV is
+        # enabled; otherwise the layer stays ON with zero map records until a
+        # later scheduler cycle happens to run.
+        if get_camera_count() == 0:
+            run_all_ingestors()
+        fetch_cctv()
+        logger.info("CCTV loaded (layer enabled)")
+        return
     if key == "firms":
         from services.fetchers.earth_observation import (
             fetch_firms_country_fires,
@@ -76,6 +95,42 @@ def _slow_fetch(key: str) -> None:
 
         fetch_fishing_activity()
         logger.info("Fishing activity loaded (layer enabled)")
+        return
+    if key == "uap_sightings":
+        from services.fetchers.earth_observation import fetch_uap_sightings
+
+        fetch_uap_sightings()
+        logger.info("UAP sightings loaded (layer enabled)")
+        return
+    if key == "malware_c2":
+        from services.fetchers.malware import fetch_malware_threats
+
+        fetch_malware_threats()
+        logger.info("Malware C2 loaded (layer enabled)")
+        return
+    if key == "cyber_threats":
+        from services.fetchers.cyber_status import fetch_cyber_threats
+
+        fetch_cyber_threats()
+        logger.info("Cyber threats loaded (layer enabled)")
+        return
+    if key == "scm_suppliers":
+        from services.scm.suppliers import fetch_scm_suppliers
+
+        fetch_scm_suppliers()
+        logger.info("SCM suppliers loaded (layer enabled)")
+        return
+    if key == "telegram_osint":
+        from services.fetchers.telegram_osint import fetch_telegram_osint
+
+        fetch_telegram_osint()
+        logger.info("Telegram OSINT loaded (layer enabled)")
+        return
+    if key == "gt_risk":
+        from analytics.integration import maybe_refresh_gt_analytics
+
+        maybe_refresh_gt_analytics()
+        logger.info("Strategic Risk Analytics refreshed (layer enabled)")
         return
     raise KeyError(key)
 
